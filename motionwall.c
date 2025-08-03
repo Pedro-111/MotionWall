@@ -295,269 +295,268 @@ static void setup_compositor_integration(void) {
         config.compositor_aware = true;
         
         // Set properties for better compositor integration
-        // Set properties for better compositor integration
-switch (config.de) {
-    case DE_GNOME: {
-        // GNOME Shell specific optimizations
-        if (debug) fprintf(stderr, NAME ": Applying GNOME Shell optimizations\n");
-        
-        // Set GNOME-specific window properties
-        Atom gnome_panel_atom = ATOM(_GNOME_PANEL_DESKTOP_AREA);
-        if (gnome_panel_atom != None) {
-            // Respect GNOME panel areas
-            long desktop_area[4];
-            Atom actual_type;
-            int actual_format;
-            unsigned long nitems, bytes_after;
-            unsigned char *prop_data = NULL;
-            
-            if (XGetWindowProperty(display, DefaultRootWindow(display),
+        switch (config.de) {
+            case DE_GNOME: {
+                // GNOME Shell specific optimizations
+                if (debug) fprintf(stderr, NAME ": Applying GNOME Shell optimizations\n");
+                
+                // Set GNOME-specific window properties
+                Atom gnome_panel_atom = ATOM(_GNOME_PANEL_DESKTOP_AREA);
+                if (gnome_panel_atom != None) {
+                    // Respect GNOME panel areas
+                    long desktop_area[4];
+                    Atom actual_type;
+                    int actual_format;
+                    unsigned long nitems, bytes_after;
+                    unsigned char *prop_data = NULL;
+                    
+                    if (XGetWindowProperty(display, DefaultRootWindow(display),
                                  gnome_panel_atom, 0, 4, False, XA_CARDINAL,
                                  &actual_type, &actual_format, &nitems,
                                  &bytes_after, &prop_data) == Success) {
-                
-                if (prop_data && nitems == 4) {
-                    long *area = (long*)prop_data;
-                    if (debug) {
-                        fprintf(stderr, NAME ": GNOME desktop area: %ldx%ld+%ld+%ld\n",
-                                area[2], area[3], area[0], area[1]);
+                        
+                        if (prop_data && nitems == 4) {
+                            long *area = (long*)prop_data;
+                            if (debug) {
+                                fprintf(stderr, NAME ": GNOME desktop area: %ldx%ld+%ld+%ld\n",
+                                        area[2], area[3], area[0], area[1]);
+                            }
+                            // Adjust window positions to respect panels
+                        }
+                        if (prop_data) XFree(prop_data);
                     }
-                    // Adjust window positions to respect panels
                 }
-                if (prop_data) XFree(prop_data);
-            }
-        }
-        
-        // Set window class for GNOME recognition
-        XClassHint class_hint;
-        class_hint.res_name = "motionwall";
-        class_hint.res_class = "MotionWall";
-        
-        for (int i = 0; i < config.window_count; i++) {
-            XSetClassHint(display, config.windows[i].window, &class_hint);
-            
-            // Set GNOME-specific properties
-            Atom atom = ATOM(_GNOME_WM_SKIP_ANIMATIONS);
-            if (atom != None) {
-                long value = 1;
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_CARDINAL, 32, PropModeReplace,
-                              (unsigned char*)&value, 1);
-            }
-        }
-        break;
-    }
-    
-    case DE_KDE: {
-        // KWin specific optimizations
-        if (debug) fprintf(stderr, NAME ": Applying KDE/KWin optimizations\n");
-        
-        for (int i = 0; i < config.window_count; i++) {
-            // Set KDE-specific window properties
-            Atom atom = ATOM(_KDE_NET_WM_ACTIVITIES);
-            if (atom != None) {
-                // Set to work on all activities
-                char *all_activities = "00000000-0000-0000-0000-000000000000";
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_STRING, 8, PropModeReplace,
-                              (unsigned char*)all_activities, strlen(all_activities));
+                
+                // Set window class for GNOME recognition
+                XClassHint class_hint;
+                class_hint.res_name = "motionwall";
+                class_hint.res_class = "MotionWall";
+                
+                for (int i = 0; i < config.window_count; i++) {
+                    XSetClassHint(display, config.windows[i].window, &class_hint);
+                    
+                    // Set GNOME-specific properties
+                    Atom atom = ATOM(_GNOME_WM_SKIP_ANIMATIONS);
+                    if (atom != None) {
+                        long value = 1;
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_CARDINAL, 32, PropModeReplace,
+                                      (unsigned char*)&value, 1);
+                    }
+                }
+                break;
             }
             
-            // KWin compositor integration
-            atom = ATOM(_KDE_NET_WM_BLUR_BEHIND_REGION);
-            if (atom != None) {
-                // Disable blur behind for performance
-                XDeleteProperty(display, config.windows[i].window, atom);
+            case DE_KDE: {
+                // KWin specific optimizations
+                if (debug) fprintf(stderr, NAME ": Applying KDE/KWin optimizations\n");
+                
+                for (int i = 0; i < config.window_count; i++) {
+                    // Set KDE-specific window properties
+                    Atom atom = ATOM(_KDE_NET_WM_ACTIVITIES);
+                    if (atom != None) {
+                        // Set to work on all activities
+                        char *all_activities = "00000000-0000-0000-0000-000000000000";
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_STRING, 8, PropModeReplace,
+                                      (unsigned char*)all_activities, strlen(all_activities));
+                    }
+                    
+                    // KWin compositor integration
+                    atom = ATOM(_KDE_NET_WM_BLUR_BEHIND_REGION);
+                    if (atom != None) {
+                        // Disable blur behind for performance
+                        XDeleteProperty(display, config.windows[i].window, atom);
+                    }
+                    
+                    // Set window to desktop layer
+                    atom = ATOM(_NET_WM_WINDOW_TYPE);
+                    Atom desktop_type = ATOM(_NET_WM_WINDOW_TYPE_DESKTOP);
+                    XChangeProperty(display, config.windows[i].window, atom,
+                                  XA_ATOM, 32, PropModeReplace,
+                                  (unsigned char*)&desktop_type, 1);
+                    
+                    // KWin specific bypass compositor hint
+                    atom = ATOM(_KDE_NET_WM_BYPASS_COMPOSITOR);
+                    if (atom != None) {
+                        long value = 1; // Bypass compositor for better performance
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_CARDINAL, 32, PropModeReplace,
+                                      (unsigned char*)&value, 1);
+                    }
+                }
+                break;
             }
             
-            // Set window to desktop layer
-            atom = ATOM(_NET_WM_WINDOW_TYPE);
-            Atom desktop_type = ATOM(_NET_WM_WINDOW_TYPE_DESKTOP);
-            XChangeProperty(display, config.windows[i].window, atom,
-                          XA_ATOM, 32, PropModeReplace,
-                          (unsigned char*)&desktop_type, 1);
-            
-            // KWin specific bypass compositor hint
-            atom = ATOM(_KDE_NET_WM_BYPASS_COMPOSITOR);
-            if (atom != None) {
-                long value = 1; // Bypass compositor for better performance
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_CARDINAL, 32, PropModeReplace,
-                              (unsigned char*)&value, 1);
-            }
-        }
-        break;
-    }
-    
-    case DE_CINNAMON: {
-        // Muffin (Cinnamon's compositor) specific optimizations
-        if (debug) fprintf(stderr, NAME ": Applying Cinnamon/Muffin optimizations\n");
-        
-        for (int i = 0; i < config.window_count; i++) {
-            // Cinnamon desktop integration
-            Atom atom = ATOM(_MUFFIN_HINTS);
-            if (atom != None) {
-                // Set Muffin-specific hints
-                long hints = 0x1; // Background window hint
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_CARDINAL, 32, PropModeReplace,
-                              (unsigned char*)&hints, 1);
-            }
-            
-            // Ensure proper stacking with Nemo desktop
-            atom = ATOM(_NET_WM_STATE);
-            if (atom != None) {
-                Atom states[2] = {
-                    ATOM(_NET_WM_STATE_BELOW),
-                    ATOM(_NET_WM_STATE_SKIP_TASKBAR)
-                };
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_ATOM, 32, PropModeReplace,
-                              (unsigned char*)states, 2);
+            case DE_CINNAMON: {
+                // Muffin (Cinnamon's compositor) specific optimizations
+                if (debug) fprintf(stderr, NAME ": Applying Cinnamon/Muffin optimizations\n");
+                
+                for (int i = 0; i < config.window_count; i++) {
+                    // Cinnamon desktop integration
+                    Atom atom = ATOM(_MUFFIN_HINTS);
+                    if (atom != None) {
+                        // Set Muffin-specific hints
+                        long hints = 0x1; // Background window hint
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_CARDINAL, 32, PropModeReplace,
+                                      (unsigned char*)&hints, 1);
+                    }
+                    
+                    // Ensure proper stacking with Nemo desktop
+                    atom = ATOM(_NET_WM_STATE);
+                    if (atom != None) {
+                        Atom states[2] = {
+                            ATOM(_NET_WM_STATE_BELOW),
+                            ATOM(_NET_WM_STATE_SKIP_TASKBAR)
+                        };
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_ATOM, 32, PropModeReplace,
+                                      (unsigned char*)states, 2);
+                    }
+                    
+                    // Set desktop type for proper Nemo integration
+                    atom = ATOM(_NET_WM_WINDOW_TYPE);
+                    Atom desktop_type = ATOM(_NET_WM_WINDOW_TYPE_DESKTOP);
+                    XChangeProperty(display, config.windows[i].window, atom,
+                                  XA_ATOM, 32, PropModeReplace,
+                                  (unsigned char*)&desktop_type, 1);
+                }
+                break;
             }
             
-            // Set desktop type for proper Nemo integration
-            atom = ATOM(_NET_WM_WINDOW_TYPE);
-            Atom desktop_type = ATOM(_NET_WM_WINDOW_TYPE_DESKTOP);
-            XChangeProperty(display, config.windows[i].window, atom,
-                          XA_ATOM, 32, PropModeReplace,
-                          (unsigned char*)&desktop_type, 1);
-        }
-        break;
-    }
-    
-    case DE_XFCE: {
-        // Xfwm4 and Xfce specific optimizations
-        if (debug) fprintf(stderr, NAME ": Applying XFCE optimizations\n");
-        
-        for (int i = 0; i < config.window_count; i++) {
-            // XFCE desktop integration
-            Atom atom = ATOM(_XFCE_DESKTOP_WINDOW);
-            if (atom != None) {
-                long value = 1;
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_CARDINAL, 32, PropModeReplace,
-                              (unsigned char*)&value, 1);
+            case DE_XFCE: {
+                // Xfwm4 and Xfce specific optimizations
+                if (debug) fprintf(stderr, NAME ": Applying XFCE optimizations\n");
+                
+                for (int i = 0; i < config.window_count; i++) {
+                    // XFCE desktop integration
+                    Atom atom = ATOM(_XFCE_DESKTOP_WINDOW);
+                    if (atom != None) {
+                        long value = 1;
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_CARDINAL, 32, PropModeReplace,
+                                      (unsigned char*)&value, 1);
+                    }
+                    
+                    // Ensure window is below desktop icons
+                    atom = ATOM(_NET_WM_STATE);
+                    if (atom != None) {
+                        Atom below = ATOM(_NET_WM_STATE_BELOW);
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_ATOM, 32, PropModeReplace,
+                                      (unsigned char*)&below, 1);
+                    }
+                }
+                break;
             }
             
-            // Ensure window is below desktop icons
-            atom = ATOM(_NET_WM_STATE);
-            if (atom != None) {
-                Atom below = ATOM(_NET_WM_STATE_BELOW);
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_ATOM, 32, PropModeReplace,
-                              (unsigned char*)&below, 1);
-            }
-        }
-        break;
-    }
-    
-    case DE_MATE: {
-        // MATE desktop specific optimizations
-        if (debug) fprintf(stderr, NAME ": Applying MATE optimizations\n");
-        
-        for (int i = 0; i < config.window_count; i++) {
-            // MATE/Marco compositor integration
-            Atom atom = ATOM(_MATE_DESKTOP_WINDOW);
-            if (atom != None) {
-                long value = 1;
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_CARDINAL, 32, PropModeReplace,
-                              (unsigned char*)&value, 1);
-            }
-        }
-        break;
-    }
-    
-    case DE_I3: {
-        // i3wm specific optimizations
-        if (debug) fprintf(stderr, NAME ": Applying i3wm optimizations\n");
-        
-        for (int i = 0; i < config.window_count; i++) {
-            // i3 doesn't use traditional desktop concepts
-            // Set window to be floating and positioned correctly
-            Atom atom = ATOM(_NET_WM_STATE);
-            if (atom != None) {
-                Atom states[3] = {
-                    ATOM(_NET_WM_STATE_STICKY),
-                    ATOM(_NET_WM_STATE_SKIP_TASKBAR),
-                    ATOM(_NET_WM_STATE_SKIP_PAGER)
-                };
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_ATOM, 32, PropModeReplace,
-                              (unsigned char*)states, 3);
-            }
-        }
-        break;
-    }
-    
-    default: {
-        // Generic optimizations for unknown desktop environments
-        if (debug) fprintf(stderr, NAME ": Applying generic desktop optimizations\n");
-        
-        for (int i = 0; i < config.window_count; i++) {
-            // Basic window properties that should work everywhere
-            Atom atom = ATOM(_NET_WM_STATE);
-            if (atom != None) {
-                Atom states[2] = {
-                    ATOM(_NET_WM_STATE_BELOW),
-                    ATOM(_NET_WM_STATE_SKIP_TASKBAR)
-                };
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_ATOM, 32, PropModeReplace,
-                              (unsigned char*)states, 2);
+            case DE_MATE: {
+                // MATE desktop specific optimizations
+                if (debug) fprintf(stderr, NAME ": Applying MATE optimizations\n");
+                
+                for (int i = 0; i < config.window_count; i++) {
+                    // MATE/Marco compositor integration
+                    Atom atom = ATOM(_MATE_DESKTOP_WINDOW);
+                    if (atom != None) {
+                        long value = 1;
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_CARDINAL, 32, PropModeReplace,
+                                      (unsigned char*)&value, 1);
+                    }
+                }
+                break;
             }
             
-            // Set as desktop type window
-            atom = ATOM(_NET_WM_WINDOW_TYPE);
-            if (atom != None) {
-                Atom desktop_type = ATOM(_NET_WM_WINDOW_TYPE_DESKTOP);
-                XChangeProperty(display, config.windows[i].window, atom,
-                              XA_ATOM, 32, PropModeReplace,
-                              (unsigned char*)&desktop_type, 1);
+            case DE_I3: {
+                // i3wm specific optimizations
+                if (debug) fprintf(stderr, NAME ": Applying i3wm optimizations\n");
+                
+                for (int i = 0; i < config.window_count; i++) {
+                    // i3 doesn't use traditional desktop concepts
+                    // Set window to be floating and positioned correctly
+                    Atom atom = ATOM(_NET_WM_STATE);
+                    if (atom != None) {
+                        Atom states[3] = {
+                            ATOM(_NET_WM_STATE_STICKY),
+                            ATOM(_NET_WM_STATE_SKIP_TASKBAR),
+                            ATOM(_NET_WM_STATE_SKIP_PAGER)
+                        };
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_ATOM, 32, PropModeReplace,
+                                      (unsigned char*)states, 3);
+                    }
+                }
+                break;
+            }
+            
+            default: {
+                // Generic optimizations for unknown desktop environments
+                if (debug) fprintf(stderr, NAME ": Applying generic desktop optimizations\n");
+                
+                for (int i = 0; i < config.window_count; i++) {
+                    // Basic window properties that should work everywhere
+                    Atom atom = ATOM(_NET_WM_STATE);
+                    if (atom != None) {
+                        Atom states[2] = {
+                            ATOM(_NET_WM_STATE_BELOW),
+                            ATOM(_NET_WM_STATE_SKIP_TASKBAR)
+                        };
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_ATOM, 32, PropModeReplace,
+                                      (unsigned char*)states, 2);
+                    }
+                    
+                    // Set as desktop type window
+                    atom = ATOM(_NET_WM_WINDOW_TYPE);
+                    if (atom != None) {
+                        Atom desktop_type = ATOM(_NET_WM_WINDOW_TYPE_DESKTOP);
+                        XChangeProperty(display, config.windows[i].window, atom,
+                                      XA_ATOM, 32, PropModeReplace,
+                                      (unsigned char*)&desktop_type, 1);
+                    }
+                }
+                break;
             }
         }
-        break;
-    }
-}
 
-// Additional compositor detection and optimization
-Window comp_window = XGetSelectionOwner(display, ATOM(_NET_WM_CM_S0));
-if (comp_window != None) {
-    if (debug) fprintf(stderr, NAME ": Compositor detected, applying additional optimizations\n");
-    
-    // Query compositor capabilities
-    Atom comp_atom = ATOM(_NET_WM_CM_S0);
-    
-    for (int i = 0; i < config.window_count; i++) {
-        // Set opacity for compositor
-        Atom opacity_atom = ATOM(_NET_WM_WINDOW_OPACITY);
-        if (opacity_atom != None) {
-            unsigned long opacity = 0xFFFFFFFF; // Fully opaque
-            XChangeProperty(display, config.windows[i].window, opacity_atom,
-                          XA_CARDINAL, 32, PropModeReplace,
-                          (unsigned char*)&opacity, 1);
+        // Additional compositor detection and optimization
+        Window comp_window = XGetSelectionOwner(display, ATOM(_NET_WM_CM_S0));
+        if (comp_window != None) {
+            if (debug) fprintf(stderr, NAME ": Compositor detected, applying additional optimizations\n");
+            
+            // Query compositor capabilities
+            Atom comp_atom = ATOM(_NET_WM_CM_S0);
+            
+            for (int i = 0; i < config.window_count; i++) {
+                // Set opacity for compositor
+                Atom opacity_atom = ATOM(_NET_WM_WINDOW_OPACITY);
+                if (opacity_atom != None) {
+                    unsigned long opacity = 0xFFFFFFFF; // Fully opaque
+                    XChangeProperty(display, config.windows[i].window, opacity_atom,
+                                  XA_CARDINAL, 32, PropModeReplace,
+                                  (unsigned char*)&opacity, 1);
+                }
+                
+                // Disable window shadows if supported
+                Atom shadow_atom = ATOM(_COMPTON_SHADOW);
+                if (shadow_atom != None) {
+                    long value = 0; // Disable shadows
+                    XChangeProperty(display, config.windows[i].window, shadow_atom,
+                                  XA_CARDINAL, 32, PropModeReplace,
+                                  (unsigned char*)&value, 1);
+                }
+                
+                // Disable window fading
+                Atom fade_atom = ATOM(_COMPTON_FADE);
+                if (fade_atom != None) {
+                    long value = 0; // Disable fading
+                    XChangeProperty(display, config.windows[i].window, fade_atom,
+                                  XA_CARDINAL, 32, PropModeReplace,
+                                  (unsigned char*)&value, 1);
+                }
+            }
         }
-        
-        // Disable window shadows if supported
-        Atom shadow_atom = ATOM(_COMPTON_SHADOW);
-        if (shadow_atom != None) {
-            long value = 0; // Disable shadows
-            XChangeProperty(display, config.windows[i].window, shadow_atom,
-                          XA_CARDINAL, 32, PropModeReplace,
-                          (unsigned char*)&value, 1);
-        }
-        
-        // Disable window fading
-        Atom fade_atom = ATOM(_COMPTON_FADE);
-        if (fade_atom != None) {
-            long value = 0; // Disable fading
-            XChangeProperty(display, config.windows[i].window, fade_atom,
-                          XA_CARDINAL, 32, PropModeReplace,
-                          (unsigned char*)&value, 1);
-        }
-    }
-}
     }
 }
 
@@ -845,7 +844,7 @@ static void load_config_file(const char *config_path) {
     if (!file) return;
     
     char line[1024];
-    while (fgets(line, sizeof(line), file)) {
+    while (fgets(line, sizeof(line), file) {
         // Remove newline
         line[strcspn(line, "\n")] = 0;
         
@@ -1139,171 +1138,171 @@ int main(int argc, char **argv) {
        }
        
        // Process X11 events
-       // Process X11 events
-while (XPending(display)) {
-    XEvent event;
-    XNextEvent(display, &event);
-    
-    switch (event.type) {
-        case ConfigureNotify: {
-            // Handle window configuration changes
-            XConfigureEvent *ce = &event.xconfigure;
-            
-            // Find which window was configured
-            for (int i = 0; i < config.window_count; i++) {
-                if (config.windows[i].window == ce->window) {
-                    // Check if size changed
-                    if (ce->width != (int)config.windows[i].width || 
-                        ce->height != (int)config.windows[i].height) {
-                        
-                        config.windows[i].width = ce->width;
-                        config.windows[i].height = ce->height;
-                        config.windows[i].x = ce->x;
-                        config.windows[i].y = ce->y;
-                        
-                        if (debug) {
-                            fprintf(stderr, NAME ": Window %d resized to %dx%d+%d+%d\n",
-                                    i, ce->width, ce->height, ce->x, ce->y);
-                        }
-                        
-                        // Restart media player with new dimensions
-                        if (child_pids[i] > 0) {
-                            kill(child_pids[i], SIGTERM);
-                            waitpid(child_pids[i], NULL, 0);
-                            child_pids[i] = 0;
-                        }
-                        
-                        // Small delay before restart
-                        usleep(500000);
-                        start_media_player(i);
-                    }
-                    break;
-                }
-            }
-            break;
-        }
-        
-        case Expose: {
-            // Handle expose events
-            XExposeEvent *ee = &event.xexpose;
-            
-            // Only handle if this is the last expose event in the sequence
-            if (ee->count == 0) {
-                for (int i = 0; i < config.window_count; i++) {
-                    if (config.windows[i].window == ee->window) {
-                        // Clear the exposed area
-                        XClearArea(display, config.windows[i].window,
-                                 ee->x, ee->y, ee->width, ee->height, False);
-                        
-                        // Force window to bottom layer
-                        XLowerWindow(display, config.windows[i].window);
-                        
-                        if (debug) {
-                            fprintf(stderr, NAME ": Expose event for window %d (%dx%d+%d+%d)\n",
-                                    i, ee->width, ee->height, ee->x, ee->y);
-                        }
-                        break;
-                    }
-                }
-            }
-            break;
-        }
-        
-        case PropertyNotify: {
-            // Handle property changes (useful for desktop environment changes)
-            XPropertyEvent *pe = &event.xproperty;
-            
-            if (pe->atom == ATOM(_NET_CURRENT_DESKTOP) || 
-                pe->atom == ATOM(_NET_DESKTOP_GEOMETRY)) {
-                
-                if (debug) {
-                    fprintf(stderr, NAME ": Desktop property changed, checking configuration\n");
-                }
-                
-                // Re-detect monitors in case of configuration change
-                int old_count = config.monitors.count;
-                detect_monitors();
-                
-                if (config.monitors.count != old_count) {
-                    if (debug) {
-                        fprintf(stderr, NAME ": Monitor configuration changed (%d -> %d)\n",
-                                old_count, config.monitors.count);
-                    }
-                    
-                    // TODO: Handle monitor configuration changes
-                    // This would involve recreating windows for new monitor setup
-                }
-            }
-            break;
-        }
-        
-        case DestroyNotify: {
-            // Handle window destruction
-            XDestroyWindowEvent *de = &event.xdestroywindow;
-            
-            for (int i = 0; i < config.window_count; i++) {
-                if (config.windows[i].window == de->window) {
-                    if (debug) {
-                        fprintf(stderr, NAME ": Window %d was destroyed\n", i);
-                    }
-                    
-                    // Mark window as invalid
-                    config.windows[i].window = None;
-                    
-                    // Kill associated media player
-                    if (child_pids[i] > 0) {
-                        kill(child_pids[i], SIGTERM);
-                        child_pids[i] = 0;
-                    }
-                    break;
-                }
-            }
-            break;
-        }
-        
-        case VisibilityNotify: {
-            // Handle visibility changes
-            XVisibilityEvent *ve = &event.xvisibility;
-            
-            for (int i = 0; i < config.window_count; i++) {
-                if (config.windows[i].window == ve->window) {
-                    if (ve->state == VisibilityFullyObscured) {
-                        if (debug) {
-                            fprintf(stderr, NAME ": Window %d fully obscured\n", i);
-                        }
-                        // Optionally pause media player to save resources
-                    } else if (ve->state == VisibilityUnobscured) {
-                        if (debug) {
-                            fprintf(stderr, NAME ": Window %d unobscured\n", i);
-                        }
-                        // Ensure window stays at bottom
-                        XLowerWindow(display, config.windows[i].window);
-                    }
-                    break;
-                }
-            }
-            break;
-        }
-        
-        case ClientMessage: {
-            // Handle client messages (useful for desktop environment communication)
-            XClientMessageEvent *cm = &event.xclient;
-            
-            if (cm->message_type == ATOM(_NET_WM_STATE)) {
-                if (debug) {
-                    fprintf(stderr, NAME ": Received WM state change message\n");
-                }
-                // Handle window manager state changes
-            }
-            break;
-        }
-        
-        default:
-            // Handle other events if needed
-            break;
-    }
-}
-   
-   cleanup_and_exit();
-   return 0;
+       while (XPending(display)) {
+           XEvent event;
+           XNextEvent(display, &event);
+           
+           switch (event.type) {
+               case ConfigureNotify: {
+                   // Handle window configuration changes
+                   XConfigureEvent *ce = &event.xconfigure;
+                   
+                   // Find which window was configured
+                   for (int i = 0; i < config.window_count; i++) {
+                       if (config.windows[i].window == ce->window) {
+                           // Check if size changed
+                           if (ce->width != (int)config.windows[i].width || 
+                               ce->height != (int)config.windows[i].height) {
+                               
+                               config.windows[i].width = ce->width;
+                               config.windows[i].height = ce->height;
+                               config.windows[i].x = ce->x;
+                               config.windows[i].y = ce->y;
+                               
+                               if (debug) {
+                                   fprintf(stderr, NAME ": Window %d resized to %dx%d+%d+%d\n",
+                                           i, ce->width, ce->height, ce->x, ce->y);
+                               }
+                               
+                               // Restart media player with new dimensions
+                               if (child_pids[i] > 0) {
+                                   kill(child_pids[i], SIGTERM);
+                                   waitpid(child_pids[i], NULL, 0);
+                                   child_pids[i] = 0;
+                               }
+                               
+                               // Small delay before restart
+                               usleep(500000);
+                               start_media_player(i);
+                           }
+                           break;
+                       }
+                   }
+                   break;
+               }
+               
+               case Expose: {
+                   // Handle expose events
+                   XExposeEvent *ee = &event.xexpose;
+                   
+                   // Only handle if this is the last expose event in the sequence
+                   if (ee->count == 0) {
+                       for (int i = 0; i < config.window_count; i++) {
+                           if (config.windows[i].window == ee->window) {
+                               // Clear the exposed area
+                               XClearArea(display, config.windows[i].window,
+                                        ee->x, ee->y, ee->width, ee->height, False);
+                               
+                               // Force window to bottom layer
+                               XLowerWindow(display, config.windows[i].window);
+                               
+                               if (debug) {
+                                   fprintf(stderr, NAME ": Expose event for window %d (%dx%d+%d+%d)\n",
+                                           i, ee->width, ee->height, ee->x, ee->y);
+                               }
+                               break;
+                           }
+                       }
+                   }
+                   break;
+               }
+               
+               case PropertyNotify: {
+                   // Handle property changes (useful for desktop environment changes)
+                   XPropertyEvent *pe = &event.xproperty;
+                   
+                   if (pe->atom == ATOM(_NET_CURRENT_DESKTOP) || 
+                       pe->atom == ATOM(_NET_DESKTOP_GEOMETRY)) {
+                       
+                       if (debug) {
+                           fprintf(stderr, NAME ": Desktop property changed, checking configuration\n");
+                       }
+                       
+                       // Re-detect monitors in case of configuration change
+                       int old_count = config.monitors.count;
+                       detect_monitors();
+                       
+                       if (config.monitors.count != old_count) {
+                           if (debug) {
+                               fprintf(stderr, NAME ": Monitor configuration changed (%d -> %d)\n",
+                                       old_count, config.monitors.count);
+                           }
+                           
+                           // TODO: Handle monitor configuration changes
+                           // This would involve recreating windows for new monitor setup
+                       }
+                   }
+                   break;
+               }
+               
+               case DestroyNotify: {
+                   // Handle window destruction
+                   XDestroyWindowEvent *de = &event.xdestroywindow;
+                   
+                   for (int i = 0; i < config.window_count; i++) {
+                       if (config.windows[i].window == de->window) {
+                           if (debug) {
+                               fprintf(stderr, NAME ": Window %d was destroyed\n", i);
+                           }
+                           
+                           // Mark window as invalid
+                           config.windows[i].window = None;
+                           
+                           // Kill associated media player
+                           if (child_pids[i] > 0) {
+                               kill(child_pids[i], SIGTERM);
+                               child_pids[i] = 0;
+                           }
+                           break;
+                       }
+                   }
+                   break;
+               }
+               
+               case VisibilityNotify: {
+                   // Handle visibility changes
+                   XVisibilityEvent *ve = &event.xvisibility;
+                   
+                   for (int i = 0; i < config.window_count; i++) {
+                       if (config.windows[i].window == ve->window) {
+                           if (ve->state == VisibilityFullyObscured) {
+                               if (debug) {
+                                   fprintf(stderr, NAME ": Window %d fully obscured\n", i);
+                               }
+                               // Optionally pause media player to save resources
+                           } else if (ve->state == VisibilityUnobscured) {
+                               if (debug) {
+                                   fprintf(stderr, NAME ": Window %d unobscured\n", i);
+                               }
+                               // Ensure window stays at bottom
+                               XLowerWindow(display, config.windows[i].window);
+                           }
+                           break;
+                       }
+                   }
+                   break;
+               }
+               
+               case ClientMessage: {
+                   // Handle client messages (useful for desktop environment communication)
+                   XClientMessageEvent *cm = &event.xclient;
+                   
+                   if (cm->message_type == ATOM(_NET_WM_STATE)) {
+                       if (debug) {
+                           fprintf(stderr, NAME ": Received WM state change message\n");
+                       }
+                       // Handle window manager state changes
+                   }
+                   break;
+               }
+               
+               default:
+                   // Handle other events if needed
+                   break;
+           }
+       }
+       
+       // Reduce CPU usage
+       usleep(10000); // 10 ms
+   }
 }
