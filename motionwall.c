@@ -308,10 +308,10 @@ static void create_playlist(const char *path) {
     }
 }
 
-// VERSIÓN SIMPLIFICADA Y SEGURA de setup_compositor_integration
+// VERSIÓN CORREGIDA de setup_compositor_integration para poner la ventana DEBAJO
 static void setup_compositor_integration(void) {
     if (debug) {
-        fprintf(stderr, NAME ": Setting up minimal compositor integration\n");
+        fprintf(stderr, NAME ": Setting up compositor integration to place window below desktop\n");
     }
     
     // Verificar que tenemos ventanas válidas
@@ -322,7 +322,6 @@ static void setup_compositor_integration(void) {
         return;
     }
     
-    // Configuración mínima para evitar problemas
     for (int i = 0; i < config.window_count; i++) {
         if (config.windows[i].window == None) {
             if (debug) {
@@ -331,36 +330,113 @@ static void setup_compositor_integration(void) {
             continue;
         }
         
-        // Solo establecer propiedades básicas y seguras
-        Atom atom = ATOM(_NET_WM_STATE);
-        if (atom != None) {
-            Atom below = ATOM(_NET_WM_STATE_BELOW);
-            XChangeProperty(display, config.windows[i].window, atom,
-                          XA_ATOM, 32, PropModeReplace,
-                          (unsigned char*)&below, 1);
-        }
+        Window window = config.windows[i].window;
         
-        // Establecer tipo de ventana
-        atom = ATOM(_NET_WM_WINDOW_TYPE);
-        if (atom != None) {
+        // 1. Establecer tipo de ventana como DESKTOP
+        Atom wm_window_type = ATOM(_NET_WM_WINDOW_TYPE);
+        if (wm_window_type != None) {
             Atom desktop_type = ATOM(_NET_WM_WINDOW_TYPE_DESKTOP);
-            XChangeProperty(display, config.windows[i].window, atom,
+            XChangeProperty(display, window, wm_window_type,
                           XA_ATOM, 32, PropModeReplace,
                           (unsigned char*)&desktop_type, 1);
         }
         
-        // Clase de ventana para identificación
+        // 2. Establecer estado de ventana: BELOW y SKIP_TASKBAR y SKIP_PAGER
+        Atom wm_state = ATOM(_NET_WM_STATE);
+        if (wm_state != None) {
+            Atom states[4];
+            int state_count = 0;
+            
+            Atom below = ATOM(_NET_WM_STATE_BELOW);
+            if (below != None) states[state_count++] = below;
+            
+            Atom skip_taskbar = ATOM(_NET_WM_STATE_SKIP_TASKBAR);
+            if (skip_taskbar != None) states[state_count++] = skip_taskbar;
+            
+            Atom skip_pager = ATOM(_NET_WM_STATE_SKIP_PAGER);
+            if (skip_pager != None) states[state_count++] = skip_pager;
+            
+            Atom sticky = ATOM(_NET_WM_STATE_STICKY);
+            if (sticky != None) states[state_count++] = sticky;
+            
+            if (state_count > 0) {
+                XChangeProperty(display, window, wm_state,
+                              XA_ATOM, 32, PropModeReplace,
+                              (unsigned char*)states, state_count);
+            }
+        }
+        
+        // 3. Establecer desktop como -1 (visible en todos los escritorios)
+        Atom wm_desktop = ATOM(_NET_WM_DESKTOP);
+        if (wm_desktop != None) {
+            long desktop = -1; // Todos los escritorios
+            XChangeProperty(display, window, wm_desktop,
+                          XA_CARDINAL, 32, PropModeReplace,
+                          (unsigned char*)&desktop, 1);
+        }
+        
+        // 4. Establecer clase de ventana
         XClassHint class_hint;
         class_hint.res_name = "motionwall";
         class_hint.res_class = "MotionWall";
-        XSetClassHint(display, config.windows[i].window, &class_hint);
+        XSetClassHint(display, window, &class_hint);
+        
+        // 5. Establecer nombre de ventana
+        XStoreName(display, window, "MotionWall Background");
+        
+        // 6. Configurar propiedades adicionales para Cinnamon
+        if (config.de == DE_CINNAMON) {
+            // Intentar hacer la ventana parte del fondo
+            Atom muffin_hints = XInternAtom(display, "_MUFFIN_HINTS", False);
+            if (muffin_hints != None) {
+                const char* hint = "desktop";
+                XChangeProperty(display, window, muffin_hints,
+                              XA_STRING, 8, PropModeReplace,
+                              (unsigned char*)hint, strlen(hint));
+            }
+        }
+        
+        // 7. Mover la ventana al fondo usando XLowerWindow
+        XLowerWindow(display, window);
+        
+        // 8. Para Cinnamon y GNOME, también intentar enviar mensaje al WM
+        Atom active_window = ATOM(_NET_ACTIVE_WINDOW);
+        if (active_window != None) {
+            // Enviar mensaje para que NO sea la ventana activa
+            XEvent xev;
+            memset(&xev, 0, sizeof(xev));
+            xev.type = ClientMessage;
+            xev.xclient.window = window;
+            xev.xclient.message_type = wm_state;
+            xev.xclient.format = 32;
+            xev.xclient.data.l[0] = 1; // _NET_WM_STATE_ADD
+            xev.xclient.data.l[1] = ATOM(_NET_WM_STATE_BELOW);
+            xev.xclient.data.l[2] = 0;
+            xev.xclient.data.l[3] = 1; // Normal application
+            xev.xclient.data.l[4] = 0;
+            
+            XSendEvent(display, DefaultRootWindow(display), False,
+                      SubstructureRedirectMask | SubstructureNotifyMask, &xev);
+        }
         
         if (debug) {
-            fprintf(stderr, NAME ": Configured window %d (0x%lx)\n", i, config.windows[i].window);
+            fprintf(stderr, NAME ": Configured window %d (0x%lx) for desktop background\n", i, window);
         }
     }
     
-    XFlush(display);
+    XSync(display, False);
+    
+    // Pausa adicional para que el WM procese los cambios
+    usleep(500000); // 500ms
+    
+    // Segundo intento de bajar las ventanas
+    for (int i = 0; i < config.window_count; i++) {
+        if (config.windows[i].window != None) {
+            XLowerWindow(display, config.windows[i].window);
+        }
+    }
+    
+    XSync(display, False);
     
     if (debug) {
         fprintf(stderr, NAME ": Compositor integration setup complete\n");
@@ -384,7 +460,7 @@ static Window find_desktop_window(Window *p_root, Window *p_desktop, int monitor
     return root;
 }
 */
-// VERSIÓN CORREGIDA Y SIMPLIFICADA de create_window_for_monitor
+// VERSIÓN CORREGIDA de create_window_for_monitor
 static void create_window_for_monitor(int monitor_id) {
     if (monitor_id >= config.monitors.count || monitor_id < 0) {
         fprintf(stderr, NAME ": Error: Invalid monitor ID %d\n", monitor_id);
@@ -413,19 +489,20 @@ static void create_window_for_monitor(int monitor_id) {
     win->root = DefaultRootWindow(display);
     win->desktop = win->root;
     
-    // Configurar atributos de ventana de forma segura
+    // Configurar atributos de ventana para fondo
     XSetWindowAttributes attrs;
     memset(&attrs, 0, sizeof(attrs));
     
     attrs.background_pixel = BlackPixel(display, screen);
     attrs.backing_store = NotUseful;
     attrs.save_under = False;
-    attrs.event_mask = StructureNotifyMask;
-    attrs.override_redirect = True;
+    attrs.event_mask = StructureNotifyMask | ExposureMask;
+    attrs.override_redirect = False;  // Cambiado a False para permitir WM control
     attrs.colormap = win->colourmap;
+    attrs.class = InputOutput;
     
     unsigned long attr_mask = CWBackPixel | CWBackingStore | CWSaveUnder | 
-                             CWEventMask | CWOverrideRedirect | CWColormap;
+                             CWEventMask | CWOverrideRedirect | CWColormap | CWClass;
     
     // Crear ventana
     win->window = XCreateWindow(display, win->root, 
@@ -439,19 +516,33 @@ static void create_window_for_monitor(int monitor_id) {
         return;
     }
     
-    // Configuración mínima de propiedades
-    Atom xa = ATOM(_NET_WM_WINDOW_TYPE);
-    if (xa != None) {
-        Atom prop = ATOM(_NET_WM_WINDOW_TYPE_DESKTOP);
-        XChangeProperty(display, win->window, xa, XA_ATOM, 32, PropModeReplace,
-                        (unsigned char *)&prop, 1);
-    }
+    // Configurar hints de WM ANTES de mapear
+    XSizeHints size_hints;
+    size_hints.flags = PPosition | PSize | PMinSize | PMaxSize;
+    size_hints.x = win->x;
+    size_hints.y = win->y;
+    size_hints.width = win->width;
+    size_hints.height = win->height;
+    size_hints.min_width = win->width;
+    size_hints.min_height = win->height;
+    size_hints.max_width = win->width;
+    size_hints.max_height = win->height;
+    XSetWMNormalHints(display, win->window, &size_hints);
+    
+    // Configurar WM hints
+    XWMHints wm_hints;
+    wm_hints.flags = InputHint | StateHint;
+    wm_hints.input = False;  // No queremos input
+    wm_hints.initial_state = NormalState;
+    XSetWMHints(display, win->window, &wm_hints);
     
     // Configurar nombre de ventana
-    XStoreName(display, win->window, "MotionWall");
+    XStoreName(display, win->window, "MotionWall Background");
     
     // Mapear ventana
     XMapWindow(display, win->window);
+    
+    // Inmediatamente bajar la ventana
     XLowerWindow(display, win->window);
     
     // Sincronizar con servidor X
@@ -461,10 +552,30 @@ static void create_window_for_monitor(int monitor_id) {
         fprintf(stderr, NAME ": Window created successfully: 0x%lx\n", win->window);
     }
     
-    // Pequeña pausa para que la ventana se establezca
-    usleep(100000); // 100ms
+    // Pausa para que la ventana se establezca
+    usleep(200000); // 200ms
 }
-
+// Nueva función para forzar ventanas al fondo
+static void force_windows_to_background(void) {
+    if (debug) {
+        fprintf(stderr, NAME ": Forcing windows to background\n");
+    }
+    
+    for (int i = 0; i < config.window_count; i++) {
+        if (config.windows[i].window != None) {
+            // Múltiples intentos para bajar la ventana
+            for (int attempt = 0; attempt < 3; attempt++) {
+                XLowerWindow(display, config.windows[i].window);
+                XSync(display, False);
+                usleep(100000); // 100ms entre intentos
+            }
+        }
+    }
+    
+    if (debug) {
+        fprintf(stderr, NAME ": Windows forced to background\n");
+    }
+}
 // Start media player for specific window
 static void start_media_player(int window_index) {
     char wid_arg[64];
@@ -976,10 +1087,11 @@ int main(int argc, char **argv) {
    
    // Start media players
    for (i = 0; i < config.window_count; i++) {
-       start_media_player(i);
-       usleep(100000); // 100ms between starts
-   }
-   
+        start_media_player(i);
+        usleep(100000); // 100ms between starts
+    }
+    sleep(2); // Esperar a que mpv se establezca
+    force_windows_to_background();
    // Save current configuration
    save_config_file();
    
