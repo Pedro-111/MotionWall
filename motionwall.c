@@ -554,27 +554,7 @@ static void create_window_for_monitor(int monitor_id) {
     // Pausa para que la ventana se establezca
     usleep(200000); // 200ms
 }
-// Nueva función para forzar ventanas al fondo
-static void force_windows_to_background(void) {
-    if (debug) {
-        fprintf(stderr, NAME ": Forcing windows to background\n");
-    }
-    
-    for (int i = 0; i < config.window_count; i++) {
-        if (config.windows[i].window != None) {
-            // Múltiples intentos para bajar la ventana
-            for (int attempt = 0; attempt < 3; attempt++) {
-                XLowerWindow(display, config.windows[i].window);
-                XSync(display, False);
-                usleep(100000); // 100ms entre intentos
-            }
-        }
-    }
-    
-    if (debug) {
-        fprintf(stderr, NAME ": Windows forced to background\n");
-    }
-}
+
 // Start media player for specific window
 static void start_media_player(int window_index) {
     char wid_arg[64];
