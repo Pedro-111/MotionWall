@@ -834,7 +834,7 @@ static void cleanup_and_exit(void) {
     exit(0);
 }
 
-// Configuration file support - CORRECCIÓN APLICADA AQUÍ
+// Configuration file support
 static void load_config_file(const char *config_path) {
     FILE *file = fopen(config_path, "r");
     if (!file) return;
@@ -874,11 +874,34 @@ static void load_config_file(const char *config_path) {
 static void save_config_file(void) {
     char config_dir[MAX_PATH];
     char config_path[MAX_PATH];
+    char *home = getenv("HOME");
+    size_t home_len;
+    size_t config_dir_len;
+    size_t total_len;
     
-    snprintf(config_dir, sizeof(config_dir), "%s/%s", getenv("HOME"), CONFIG_DIR);
+    if (!home) {
+        home = ".";
+    }
+    
+    // Calcular longitudes para evitar truncamiento
+    home_len = strlen(home);
+    config_dir_len = strlen(CONFIG_DIR);
+    
+    // Verificar si la ruta completa excede MAX_PATH
+    total_len = home_len + 1 + config_dir_len + 1 + 7; // +1 para '/' adicional, +7 para "/config"
+    
+    if (total_len >= MAX_PATH) {
+        // Usar ruta alternativa más corta
+        snprintf(config_dir, sizeof(config_dir), ".");
+        snprintf(config_path, sizeof(config_path), "%s/motionwall_config", config_dir);
+    } else {
+        // Construir rutas normalmente
+        snprintf(config_dir, sizeof(config_dir), "%s/%s", home, CONFIG_DIR);
+        snprintf(config_path, sizeof(config_path), "%s/config", config_dir);
+    }
+    
+    // Crear directorio si no existe
     mkdir(config_dir, 0755);
-    
-    snprintf(config_path, sizeof(config_path), "%s/config", config_dir);
     
     FILE *file = fopen(config_path, "w");
     if (!file) return;
@@ -942,7 +965,9 @@ int main(int argc, char **argv) {
     
     // Load default config
     char default_config[MAX_PATH];
-    snprintf(default_config, sizeof(default_config), "%s/%s/config", getenv("HOME"), CONFIG_DIR);
+    char *home = getenv("HOME");
+    if (!home) home = ".";
+    snprintf(default_config, sizeof(default_config), "%s/%s/config", home, CONFIG_DIR);
     load_config_file(default_config);
     
     // Parse command line arguments
