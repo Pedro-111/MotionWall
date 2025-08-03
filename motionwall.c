@@ -497,12 +497,11 @@ static void create_window_for_monitor(int monitor_id) {
     attrs.backing_store = NotUseful;
     attrs.save_under = False;
     attrs.event_mask = StructureNotifyMask | ExposureMask;
-    attrs.override_redirect = False;  // Cambiado a False para permitir WM control
+    attrs.override_redirect = False;  // False para permitir WM control
     attrs.colormap = win->colourmap;
-    attrs.class = InputOutput;
     
     unsigned long attr_mask = CWBackPixel | CWBackingStore | CWSaveUnder | 
-                             CWEventMask | CWOverrideRedirect | CWColormap | CWClass;
+                             CWEventMask | CWOverrideRedirect | CWColormap;
     
     // Crear ventana
     win->window = XCreateWindow(display, win->root, 
@@ -897,7 +896,27 @@ static void usage(void) {
     fprintf(stderr, "  %s -m ~/Videos/                 # Multi-monitor playlist\n", NAME);
     fprintf(stderr, "  %s -p mpv -s -l ~/Wallpapers/   # Shuffled looping playlist\n", NAME);
 }
-
+// Nueva función para forzar ventanas al fondo
+static void force_windows_to_background(void) {
+    if (debug) {
+        fprintf(stderr, NAME ": Forcing windows to background\n");
+    }
+    
+    for (int i = 0; i < config.window_count; i++) {
+        if (config.windows[i].window != None) {
+            // Múltiples intentos para bajar la ventana
+            for (int attempt = 0; attempt < 3; attempt++) {
+                XLowerWindow(display, config.windows[i].window);
+                XSync(display, False);
+                usleep(100000); // 100ms entre intentos
+            }
+        }
+    }
+    
+    if (debug) {
+        fprintf(stderr, NAME ": Windows forced to background\n");
+    }
+}
 // MAIN FUNCTION COMPLETAMENTE REESCRITA PARA SER SEGURA
 int main(int argc, char **argv) {
     int i;
