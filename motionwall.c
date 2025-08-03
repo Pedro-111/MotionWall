@@ -145,7 +145,6 @@ static void save_config_file(void);
 static void detect_desktop_environment(void) {
     const char *desktop = getenv("XDG_CURRENT_DESKTOP");
     const char *session = getenv("DESKTOP_SESSION");
-    // Eliminada variable 'gdm' no utilizada
     
     config.de = DE_UNKNOWN;
     
@@ -305,7 +304,6 @@ static void setup_compositor_integration(void) {
                 // Set GNOME-specific window properties
                 Atom gnome_panel_atom = ATOM(_GNOME_PANEL_DESKTOP_AREA);
                 if (gnome_panel_atom != None) {
-                    // Eliminada variable 'desktop_area' no utilizada
                     Atom actual_type;
                     int actual_format;
                     unsigned long nitems, bytes_after;
@@ -317,7 +315,7 @@ static void setup_compositor_integration(void) {
                                  &bytes_after, &prop_data) == Success) {
                         
                         if (prop_data && nitems == 4) {
-                            // Solo para debug, no se usa para nada más
+                            // Solo para debug
                             if (debug) {
                                 long *area = (long*)prop_data;
                                 fprintf(stderr, NAME ": GNOME desktop area: %ldx%ld+%ld+%ld\n",
@@ -526,7 +524,6 @@ static void setup_compositor_integration(void) {
         if (comp_window != None) {
             if (debug) fprintf(stderr, NAME ": Compositor detected, applying additional optimizations\n");
             
-            // Eliminada variable 'comp_atom' no utilizada
             for (int i = 0; i < config.window_count; i++) {
                 // Set opacity for compositor
                 Atom opacity_atom = ATOM(_NET_WM_WINDOW_OPACITY);
@@ -837,15 +834,15 @@ static void cleanup_and_exit(void) {
     exit(0);
 }
 
-// Configuration file support
+// Configuration file support - CORRECCIÓN APLICADA AQUÍ
 static void load_config_file(const char *config_path) {
     FILE *file = fopen(config_path, "r");
     if (!file) return;
     
     char line[1024];
-    while (fgets(line, sizeof(line), file) {
+    while (fgets(line, sizeof(line), file) != NULL) {
         // Remove newline
-        line[strcspn(line, "\n")] = 0;
+        line[strcspn(line, "\n")] = '\0';
         
         // Skip comments and empty lines
         if (line[0] == '#' || line[0] == '\0') continue;
@@ -1005,8 +1002,8 @@ int main(int argc, char **argv) {
            exit(1);
        }
        
-       if (chdir("/") < 0) {  // Ignorar el resultado
-           // Podríamos imprimir un mensaje de error en modo debug
+       if (chdir("/") < 0) {
+           if (debug) perror("chdir");
        }
        if (!debug) {
            close(STDIN_FILENO);
