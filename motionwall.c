@@ -136,7 +136,7 @@ static void detect_desktop_environment(void);
 static int detect_monitors(void);
 static void create_playlist(const char *path);
 static void setup_compositor_integration(void);
-static Window find_desktop_window(Window *p_root, Window *p_desktop, int monitor_id);
+//static Window find_desktop_window(Window *p_root, Window *p_desktop, int monitor_id);
 static void create_window_for_monitor(int monitor_id);
 static void start_media_player(int window_index);
 static void playlist_next(void);
@@ -366,7 +366,7 @@ static void setup_compositor_integration(void) {
         fprintf(stderr, NAME ": Compositor integration setup complete\n");
     }
 }
-
+/*
 // Enhanced desktop window finding with monitor support
 static Window find_desktop_window(Window *p_root, Window *p_desktop, int monitor_id) {
     if (!p_root || !p_desktop) {
@@ -383,7 +383,7 @@ static Window find_desktop_window(Window *p_root, Window *p_desktop, int monitor
     
     return root;
 }
-
+*/
 // VERSIÓN CORREGIDA Y SIMPLIFICADA de create_window_for_monitor
 static void create_window_for_monitor(int monitor_id) {
     if (monitor_id >= config.monitors.count || monitor_id < 0) {
