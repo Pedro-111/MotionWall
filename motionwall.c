@@ -41,6 +41,7 @@
 #include <glob.h>
 #include <libgen.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #define NAME "motionwall"
 #define VERSION "1.0.0"
@@ -571,7 +572,7 @@ static void start_media_player(int window_index) {
         return;
     }
     
-    int ret = snprintf(wid_arg, sizeof(wid_arg), "--wid=0x%lx", config.windows[window_index].window);
+    int ret = snprintf(wid_arg, sizeof(wid_arg), "0x%lx", config.windows[window_index].window);
     if (ret >= (int)sizeof(wid_arg)) {
         fprintf(stderr, NAME ": Error: Window ID too long\n");
         return;
@@ -582,10 +583,12 @@ static void start_media_player(int window_index) {
     
     // Add player-specific arguments
     if (strstr(config.media_player, "mpv")) {
-        args[argc++] = wid_arg;  // Ya incluye --wid=0x...
+        char mpv_wid_arg[64];
+        snprintf(mpv_wid_arg, sizeof(mpv_wid_arg), "--wid=0x%lx", config.windows[window_index].window);
+        args[argc++] = mpv_wid_arg;
         args[argc++] = "--really-quiet";
         args[argc++] = "--no-audio";
-        args[argc++] = "--loop-file=inf";  // Formato correcto
+        args[argc++] = "--loop-file=inf";
         args[argc++] = "--panscan=1.0";
         args[argc++] = "--keepaspect=no";
         args[argc++] = "--no-input-default-bindings";
@@ -595,26 +598,41 @@ static void start_media_player(int window_index) {
         args[argc++] = "--hwdec=auto";
     } else if (strstr(config.media_player, "mplayer")) {
         args[argc++] = "-wid";
-        char wid_simple[32];
-        snprintf(wid_simple, sizeof(wid_simple), "0x%lx", config.windows[window_index].window);
-        args[argc++] = wid_simple;
+        args[argc++] = wid_arg;  // Sin el 0x prefix para mplayer
         args[argc++] = "-nosound";
         args[argc++] = "-quiet";
+        args[argc++] = "-vo";
+        args[argc++] = "xv";  // Forzar video output xv
+        args[argc++] = "-zoom";  // Permitir zoom
         args[argc++] = "-panscan";
         args[argc++] = "1.0";
         args[argc++] = "-framedrop";
+        args[argc++] = "-cache";
+        args[argc++] = "8192";  // Cache para mejor reproducción
+        args[argc++] = "-fs";   // Fullscreen en la ventana
         if (config.media_playlist.loop) {
             args[argc++] = "-loop";
             args[argc++] = "0";
         }
     } else if (strstr(config.media_player, "vlc")) {
-        args[argc++] = "--intf";
-        args[argc++] = "dummy";
-        args[argc++] = "--no-audio";
-        args[argc++] = "--quiet";
         char drawable_arg[64];
         snprintf(drawable_arg, sizeof(drawable_arg), "--drawable-xid=0x%lx", config.windows[window_index].window);
+        
+        args[argc++] = "--intf";
+        args[argc++] = "dummy";  // Interfaz dummy (sin GUI)
+        args[argc++] = "--no-video-title-show";  // NO mostrar título del video
+        args[argc++] = "--no-audio";
+        args[argc++] = "--quiet";
+        args[argc++] = "--no-osd";  // NO mostrar OSD
+        args[argc++] = "--no-spu";  // NO mostrar subtítulos
+        args[argc++] = "--no-stats";  // NO mostrar estadísticas
+        args[argc++] = "--no-snapshot-preview";  // NO mostrar preview de capturas
+        args[argc++] = "--vout";
+        args[argc++] = "x11";  // Usar salida X11
         args[argc++] = drawable_arg;
+        args[argc++] = "--no-embedded-video";  // Asegurar video embebido
+        args[argc++] = "--video-on-top";  // Video en la parte superior de la ventana
+        args[argc++] = "--fullscreen";  // Pantalla completa en la ventana
         if (config.media_playlist.loop) {
             args[argc++] = "--loop";
         }
@@ -641,10 +659,14 @@ static void start_media_player(int window_index) {
     pid_t pid = fork();
     if (pid == 0) {
         // Child process
-        // Cerrar descriptores innecesarios
+        // Redirigir stderr y stdout para VLC (genera mucha salida)
         if (!debug) {
-            close(STDERR_FILENO);
-            close(STDOUT_FILENO);
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull != -1) {
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                close(devnull);
+            }
         }
         
         execvp(args[0], args);
