@@ -46,7 +46,9 @@
 #define CONFIG_DIR ".config/motionwall"
 #define MAX_MONITORS 16
 #define MAX_PLAYLIST 1024
-#define MAX_PATH 4096
+#define MAX_PATH 8192  // Aumentado para evitar truncation warnings
+#define MAX_CMD_ARGS 64
+#define MAX_ARG_LEN 256
 
 #define ATOM(a) XInternAtom(display, #a, False)
 
@@ -140,6 +142,24 @@ static void signal_handler(int sig);
 static void cleanup_and_exit(void);
 static void load_config_file(const char *config_path);
 static void save_config_file(void);
+static bool safe_path_join(char *dest, size_t dest_size, const char *base, const char *append);
+
+// Safe path joining function
+static bool safe_path_join(char *dest, size_t dest_size, const char *base, const char *append) {
+    if (!dest || !base || !append || dest_size == 0) {
+        return false;
+    }
+    
+    int ret = snprintf(dest, dest_size, "%s/%s", base, append);
+    if (ret < 0 || ret >= (int)dest_size) {
+        if (debug) {
+            fprintf(stderr, NAME ": Error: Path too long when joining '%s' and '%s'\n", base, append);
+        }
+        return false;
+    }
+    
+    return true;
+}
 
 // Desktop environment detection
 static void detect_desktop_environment(void) {
@@ -257,7 +277,9 @@ static void create_playlist(const char *path) {
         const int ext_count = sizeof(extensions) / sizeof(extensions[0]);
         
         for (int ext = 0; ext < ext_count; ext++) {
-            snprintf(pattern, sizeof(pattern), "%s/%s", path, extensions[ext]);
+            if (!safe_path_join(pattern, sizeof(pattern), path, extensions[ext])) {
+                continue;
+            }
             
             if (glob(pattern, (ext == 0) ? 0 : GLOB_APPEND, NULL, &glob_result) == 0) {
                 for (i = 0; i < (int)glob_result.gl_pathc && config.media_playlist.count < MAX_PLAYLIST; i++) {
@@ -355,13 +377,13 @@ static void setup_compositor_integration(void) {
                     Atom atom = ATOM(_KDE_NET_WM_ACTIVITIES);
                     if (atom != None) {
                         // Set to work on all activities
-                        char *all_activities = "00000000-0000-0000-0000-000000000000";
+                        const char *all_activities = "00000000-0000-0000-0000-000000000000";
                         XChangeProperty(display, config.windows[i].window, atom,
                                       XA_STRING, 8, PropModeReplace,
                                       (unsigned char*)all_activities, strlen(all_activities));
                     }
                     
-                    // KWin compositor integration
+                    // KWincompositor integration
                     atom = ATOM(_KDE_NET_WM_BLUR_BEHIND_REGION);
                     if (atom != None) {
                         // Disable blur behind for performance
@@ -711,624 +733,655 @@ static void create_window_for_monitor(int monitor_id) {
     }
 }
 
-// Start media player for specific window
+// Start media player for specific window - CORREGIDO
 static void start_media_player(int window_index) {
-    char wid_arg[64];
-    char *args[32];
-    int argc = 0;
-    
-    if (config.media_playlist.count == 0) {
-        fprintf(stderr, NAME ": Error: No media files in playlist\n");
-        return;
-    }
-    
-    sprintf(wid_arg, "0x%x", (unsigned int)config.windows[window_index].window);
-    
-    // Build command line
-    args[argc++] = config.media_player;
-    
-    // Add player-specific arguments
-    if (strstr(config.media_player, "mpv")) {
-        args[argc++] = "--wid";
-        args[argc++] = wid_arg;
-        args[argc++] = "--really-quiet";
-        args[argc++] = "--no-audio";
-        args[argc++] = "--loop-file";
-        args[argc++] = config.media_playlist.loop ? "inf" : "no";
-        args[argc++] = "--panscan=1.0";
-        args[argc++] = "--keepaspect=no";
-    } else if (strstr(config.media_player, "mplayer")) {
-        args[argc++] = "-wid";
-        args[argc++] = wid_arg;
-        args[argc++] = "-nosound";
-        args[argc++] = "-panscan";
-        args[argc++] = "1.0";
-        args[argc++] = "-framedrop";
-        if (config.media_playlist.loop) {
-            args[argc++] = "-loop";
-            args[argc++] = "0";
-        }
-    } else if (strstr(config.media_player, "vlc")) {
-        args[argc++] = "--intf";
-        args[argc++] = "dummy";
-        args[argc++] = "--no-audio";
-        args[argc++] = "--drawable-xid";
-        args[argc++] = wid_arg;
-        if (config.media_playlist.loop) {
-            args[argc++] = "--loop";
-        }
-    }
-    
-    // Add current media file
-    args[argc++] = config.media_playlist.paths[config.media_playlist.current];
-    args[argc++] = NULL;
-    
-    pid_t pid = fork();
-    if (pid == 0) {
-        // Child process
-        execvp(args[0], args);
-        perror(args[0]);
-        exit(2);
-    } else if (pid > 0) {
-        // Parent process
-        child_pids[child_count++] = pid;
-        if (debug) {
-            fprintf(stderr, NAME ": Started %s (PID %d) for window %d with file: %s\n",
-                    config.media_player, pid, window_index,
-                    config.media_playlist.paths[config.media_playlist.current]);
-        }
-    } else {
-        perror("fork");
-    }
+   char wid_arg[64];
+   char *args[MAX_CMD_ARGS];
+   int argc = 0;
+   
+   if (config.media_playlist.count == 0) {
+       fprintf(stderr, NAME ": Error: No media files in playlist\n");
+       return;
+   }
+   
+   int ret = snprintf(wid_arg, sizeof(wid_arg), "0x%x", (unsigned int)config.windows[window_index].window);
+   if (ret >= (int)sizeof(wid_arg)) {
+       fprintf(stderr, NAME ": Error: Window ID too long\n");
+       return;
+   }
+   
+   // Build command line
+   args[argc++] = config.media_player;
+   
+   // Add player-specific arguments
+   if (strstr(config.media_player, "mpv")) {
+       args[argc++] = "--wid";
+       args[argc++] = wid_arg;
+       args[argc++] = "--really-quiet";
+       args[argc++] = "--no-audio";
+       args[argc++] = "--loop-file";
+       args[argc++] = config.media_playlist.loop ? "inf" : "no";
+       args[argc++] = "--panscan=1.0";
+       args[argc++] = "--keepaspect=no";
+   } else if (strstr(config.media_player, "mplayer")) {
+       args[argc++] = "-wid";
+       args[argc++] = wid_arg;
+       args[argc++] = "-nosound";
+       args[argc++] = "-panscan";
+       args[argc++] = "1.0";
+       args[argc++] = "-framedrop";
+       if (config.media_playlist.loop) {
+           args[argc++] = "-loop";
+           args[argc++] = "0";
+       }
+   } else if (strstr(config.media_player, "vlc")) {
+       args[argc++] = "--intf";
+       args[argc++] = "dummy";
+       args[argc++] = "--no-audio";
+       args[argc++] = "--drawable-xid";
+       args[argc++] = wid_arg;
+       if (config.media_playlist.loop) {
+           args[argc++] = "--loop";
+       }
+   }
+   
+   // Add current media file
+   if (argc < MAX_CMD_ARGS - 1) {
+       args[argc++] = config.media_playlist.paths[config.media_playlist.current];
+       args[argc] = NULL;
+   } else {
+       fprintf(stderr, NAME ": Error: Too many command arguments\n");
+       return;
+   }
+   
+   pid_t pid = fork();
+   if (pid == 0) {
+       // Child process
+       execvp(args[0], args);
+       perror(args[0]);
+       exit(2);
+   } else if (pid > 0) {
+       // Parent process
+       if (child_count < config.window_count * 2) {
+           child_pids[child_count++] = pid;
+       }
+       if (debug) {
+           fprintf(stderr, NAME ": Started %s (PID %d) for window %d with file: %s\n",
+                   config.media_player, pid, window_index,
+                   config.media_playlist.paths[config.media_playlist.current]);
+       }
+   } else {
+       perror("fork");
+   }
 }
 
 // Playlist management
 static void playlist_next(void) {
-    if (config.media_playlist.count <= 1) return;
-    
-    if (config.media_playlist.shuffle) {
-        config.media_playlist.current = rand() % config.media_playlist.count;
-    } else {
-        config.media_playlist.current = (config.media_playlist.current + 1) % config.media_playlist.count;
-    }
-    
-    if (debug) {
-        fprintf(stderr, NAME ": Switching to: %s\n", 
-                config.media_playlist.paths[config.media_playlist.current]);
-    }
+   if (config.media_playlist.count <= 1) return;
+   
+   if (config.media_playlist.shuffle) {
+       config.media_playlist.current = rand() % config.media_playlist.count;
+   } else {
+       config.media_playlist.current = (config.media_playlist.current + 1) % config.media_playlist.count;
+   }
+   
+   if (debug) {
+       fprintf(stderr, NAME ": Switching to: %s\n", 
+               config.media_playlist.paths[config.media_playlist.current]);
+   }
 }
 
 // Signal handler
 static void signal_handler(int sig) {
-    if (debug) {
-        fprintf(stderr, NAME ": Received signal %d, cleaning up...\n", sig);
-    }
-    cleanup_and_exit();
+   if (debug) {
+       fprintf(stderr, NAME ": Received signal %d, cleaning up...\n", sig);
+   }
+   cleanup_and_exit();
 }
 
 // Cleanup and exit
 static void cleanup_and_exit(void) {
-    int i;
-    
-    // Kill all child processes
-    for (i = 0; i < child_count; i++) {
-        if (child_pids[i] > 0) {
-            kill(child_pids[i], SIGTERM);
-            waitpid(child_pids[i], NULL, WNOHANG);
-        }
-    }
-    
-    // Destroy all windows
-    if (config.windows) {
-        for (i = 0; i < config.window_count; i++) {
-            if (config.windows[i].window) {
-                XDestroyWindow(display, config.windows[i].window);
-            }
-        }
-        free(config.windows);
-    }
-    
-    if (child_pids) free(child_pids);
-    if (display) XCloseDisplay(display);
-    
-    exit(0);
+   int i;
+   
+   // Kill all child processes
+   for (i = 0; i < child_count; i++) {
+       if (child_pids[i] > 0) {
+           kill(child_pids[i], SIGTERM);
+           waitpid(child_pids[i], NULL, WNOHANG);
+       }
+   }
+   
+   // Destroy all windows
+   if (config.windows) {
+       for (i = 0; i < config.window_count; i++) {
+           if (config.windows[i].window) {
+               XDestroyWindow(display, config.windows[i].window);
+           }
+       }
+       free(config.windows);
+   }
+   
+   if (child_pids) free(child_pids);
+   if (display) XCloseDisplay(display);
+   
+   exit(0);
 }
 
-// Configuration file support
+// Configuration file support - CORREGIDO
 static void load_config_file(const char *config_path) {
-    FILE *file = fopen(config_path, "r");
-    if (!file) return;
-    
-    char line[1024];
-    while (fgets(line, sizeof(line), file) != NULL) {
-        // Remove newline
-        line[strcspn(line, "\n")] = '\0';
-        
-        // Skip comments and empty lines
-        if (line[0] == '#' || line[0] == '\0') continue;
-        
-        // Parse key=value pairs
-        char *eq = strchr(line, '=');
-        if (!eq) continue;
-        
-        *eq = '\0';
-        char *key = line;
-        char *value = eq + 1;
-        
-        if (strcmp(key, "media_player") == 0) {
-            strncpy(config.media_player, value, sizeof(config.media_player) - 1);
-        } else if (strcmp(key, "playlist_duration") == 0) {
-            config.media_playlist.duration = atoi(value);
-        } else if (strcmp(key, "playlist_shuffle") == 0) {
-            config.media_playlist.shuffle = (strcmp(value, "true") == 0);
-        } else if (strcmp(key, "playlist_loop") == 0) {
-            config.media_playlist.loop = (strcmp(value, "true") == 0);
-        } else if (strcmp(key, "multi_monitor") == 0) {
-            config.multi_monitor = (strcmp(value, "true") == 0);
-        }
-    }
-    
-    fclose(file);
+   FILE *file = fopen(config_path, "r");
+   if (!file) return;
+   
+   char line[1024];
+   while (fgets(line, sizeof(line), file) != NULL) {
+       // Remove newline
+       line[strcspn(line, "\n")] = '\0';
+       
+       // Skip comments and empty lines
+       if (line[0] == '#' || line[0] == '\0') continue;
+       
+       // Parse key=value pairs
+       char *eq = strchr(line, '=');
+       if (!eq) continue;
+       
+       *eq = '\0';
+       char *key = line;
+       char *value = eq + 1;
+       
+       if (strcmp(key, "media_player") == 0) {
+           strncpy(config.media_player, value, sizeof(config.media_player) - 1);
+           config.media_player[sizeof(config.media_player) - 1] = '\0';
+       } else if (strcmp(key, "playlist_duration") == 0) {
+           config.media_playlist.duration = atoi(value);
+       } else if (strcmp(key, "playlist_shuffle") == 0) {
+           config.media_playlist.shuffle = (strcmp(value, "true") == 0);
+       } else if (strcmp(key, "playlist_loop") == 0) {
+           config.media_playlist.loop = (strcmp(value, "true") == 0);
+       } else if (strcmp(key, "multi_monitor") == 0) {
+           config.multi_monitor = (strcmp(value, "true") == 0);
+       }
+   }
+   
+   fclose(file);
 }
 
+// Save configuration file - CORREGIDO
 static void save_config_file(void) {
-    char config_dir[MAX_PATH];
-    char config_path[MAX_PATH];
-    char *home = getenv("HOME");
-    size_t home_len;
-    size_t config_dir_len;
-    size_t total_len;
-    
-    if (!home) {
-        home = ".";
-    }
-    
-    // Calcular longitudes para evitar truncamiento
-    home_len = strlen(home);
-    config_dir_len = strlen(CONFIG_DIR);
-    
-    // Verificar si la ruta completa excede MAX_PATH
-    total_len = home_len + 1 + config_dir_len + 1 + 7; // +1 para '/' adicional, +7 para "/config"
-    
-    if (total_len >= MAX_PATH) {
-        // Usar ruta alternativa más corta
-        snprintf(config_dir, sizeof(config_dir), ".");
-        snprintf(config_path, sizeof(config_path), "%s/motionwall_config", config_dir);
-    } else {
-        // Construir rutas normalmente
-        snprintf(config_dir, sizeof(config_dir), "%s/%s", home, CONFIG_DIR);
-        snprintf(config_path, sizeof(config_path), "%s/config", config_dir);
-    }
-    
-    // Crear directorio si no existe
-    mkdir(config_dir, 0755);
-    
-    FILE *file = fopen(config_path, "w");
-    if (!file) return;
-    
-    fprintf(file, "# MotionWall Configuration File\n");
-    fprintf(file, "media_player=%s\n", config.media_player);
-    fprintf(file, "playlist_duration=%d\n", config.media_playlist.duration);
-    fprintf(file, "playlist_shuffle=%s\n", config.media_playlist.shuffle ? "true" : "false");
-    fprintf(file, "playlist_loop=%s\n", config.media_playlist.loop ? "true" : "false");
-    fprintf(file, "multi_monitor=%s\n", config.multi_monitor ? "true" : "false");
-    
-    fclose(file);
+   const char *home = getenv("HOME");
+   if (!home) {
+       fprintf(stderr, NAME ": Error: HOME environment variable not set\n");
+       return;
+   }
+   
+   char config_dir[MAX_PATH];
+   char config_path[MAX_PATH];
+   
+   // Safely construct config directory path
+   if (!safe_path_join(config_dir, sizeof(config_dir), home, CONFIG_DIR)) {
+       fprintf(stderr, NAME ": Error: Config directory path too long\n");
+       return;
+   }
+   
+   // Create config directory
+   if (mkdir(config_dir, 0755) != 0 && errno != EEXIST) {
+       if (debug) {
+           perror(NAME ": mkdir config_dir");
+       }
+   }
+   
+   // Safely construct config file path
+   if (!safe_path_join(config_path, sizeof(config_path), config_dir, "config")) {
+       fprintf(stderr, NAME ": Error: Config file path too long\n");
+       return;
+   }
+   
+   FILE *file = fopen(config_path, "w");
+   if (!file) {
+       if (debug) {
+           perror(NAME ": fopen config file");
+       }
+       return;
+   }
+   
+   fprintf(file, "# MotionWall Configuration File\n");
+   fprintf(file, "media_player=%s\n", config.media_player);
+   fprintf(file, "playlist_duration=%d\n", config.media_playlist.duration);
+   fprintf(file, "playlist_shuffle=%s\n", config.media_playlist.shuffle ? "true" : "false");
+   fprintf(file, "playlist_loop=%s\n", config.media_playlist.loop ? "true" : "false");
+   fprintf(file, "multi_monitor=%s\n", config.multi_monitor ? "true" : "false");
+   
+   fclose(file);
+   
+   if (debug) {
+       fprintf(stderr, NAME ": Configuration saved to: %s\n", config_path);
+   }
 }
 
 // Initialize X11
 static void init_x11(void) {
-    display = XOpenDisplay(NULL);
-    if (!display) {
-        fprintf(stderr, NAME ": Error: couldn't open display\n");
-        exit(1);
-    }
-    screen = DefaultScreen(display);
+   display = XOpenDisplay(NULL);
+   if (!display) {
+       fprintf(stderr, NAME ": Error: couldn't open display\n");
+       exit(1);
+   }
+   screen = DefaultScreen(display);
 }
 
 // Usage information
 static void usage(void) {
-    fprintf(stderr, "%s v%s - Advanced Desktop Background Animation Tool\n", NAME, VERSION);
-    fprintf(stderr, "\nUsage: %s [OPTIONS] <media-file-or-directory>\n\n", NAME);
-    fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  -m, --multi-monitor    Enable multi-monitor support\n");
-    fprintf(stderr, "  -p, --player PLAYER    Media player to use (mpv, mplayer, vlc)\n");
-    fprintf(stderr, "  -s, --shuffle          Shuffle playlist\n");
-    fprintf(stderr, "  -l, --loop             Loop playlist\n");
-    fprintf(stderr, "  -d, --duration SEC     Duration per video in playlist (default: 30)\n");
-    fprintf(stderr, "  -c, --config FILE      Use custom config file\n");
-    fprintf(stderr, "  --auto-res             Auto-detect and use native resolution\n");
-    fprintf(stderr, "  --daemon               Run as daemon\n");
-    fprintf(stderr, "  --debug                Enable debug output\n");
-    fprintf(stderr, "  -h, --help             Show this help\n");
-    fprintf(stderr, "\nExamples:\n");
-    fprintf(stderr, "  %s video.mp4                    # Single video\n", NAME);
-    fprintf(stderr, "  %s -m ~/Videos/                 # Multi-monitor playlist\n", NAME);
-    fprintf(stderr, "  %s -p mpv -s -l ~/Wallpapers/   # Shuffled looping playlist\n", NAME);
+   fprintf(stderr, "%s v%s - Advanced Desktop Background Animation Tool\n", NAME, VERSION);
+   fprintf(stderr, "\nUsage: %s [OPTIONS] <media-file-or-directory>\n\n", NAME);
+   fprintf(stderr, "Options:\n");
+   fprintf(stderr, "  -m, --multi-monitor    Enable multi-monitor support\n");
+   fprintf(stderr, "  -p, --player PLAYER    Media player to use (mpv, mplayer, vlc)\n");
+   fprintf(stderr, "  -s, --shuffle          Shuffle playlist\n");
+   fprintf(stderr, "  -l, --loop             Loop playlist\n");
+   fprintf(stderr, "  -d, --duration SEC     Duration per video in playlist (default: 30)\n");
+   fprintf(stderr, "  -c, --config FILE      Use custom config file\n");
+   fprintf(stderr, "  --auto-res             Auto-detect and use native resolution\n");
+   fprintf(stderr, "  --daemon               Run as daemon\n");
+   fprintf(stderr, "  --debug                Enable debug output\n");
+   fprintf(stderr, "  -h, --help             Show this help\n");
+   fprintf(stderr, "\nExamples:\n");
+   fprintf(stderr, "  %s video.mp4                    # Single video\n", NAME);
+   fprintf(stderr, "  %s -m ~/Videos/                 # Multi-monitor playlist\n", NAME);
+   fprintf(stderr, "  %s -p mpv -s -l ~/Wallpapers/   # Shuffled looping playlist\n", NAME);
 }
 
 // Main function
 int main(int argc, char **argv) {
-    int i;
-    bool daemon_mode = false;
-    char media_path[MAX_PATH] = {0};
-    
-    // Initialize configuration with defaults
-    strcpy(config.media_player, "mpv");
-    config.media_playlist.duration = 30;
-    config.media_playlist.shuffle = false;
-    config.media_playlist.loop = true;
-    config.multi_monitor = false;
-    config.auto_resolution = true;
-    config.playlist_mode = false;
-    config.compositor_aware = false;
-    
-    // Load default config
-    char default_config[MAX_PATH];
-    char *home = getenv("HOME");
-    if (!home) home = ".";
-    snprintf(default_config, sizeof(default_config), "%s/%s/config", home, CONFIG_DIR);
-    load_config_file(default_config);
-    
-    // Parse command line arguments
-    for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--multi-monitor") == 0) {
-            config.multi_monitor = true;
-        } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--player") == 0) {
-            if (++i < argc) {
-                strncpy(config.media_player, argv[i], sizeof(config.media_player) - 1);
-            }
-        } else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--shuffle") == 0) {
-            config.media_playlist.shuffle = true;
-        } else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--loop") == 0) {
-            config.media_playlist.loop = true;
-        } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--duration") == 0) {
-            if (++i < argc) {
-                config.media_playlist.duration = atoi(argv[i]);
-            }
-        } else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--config") == 0) {
-            if (++i < argc) {
-                load_config_file(argv[i]);
-            }
-        } else if (strcmp(argv[i], "--auto-res") == 0) {
-            config.auto_resolution = true;
-        } else if (strcmp(argv[i], "--daemon") == 0) {
-            daemon_mode = true;
-        } else if (strcmp(argv[i], "--debug") == 0) {
-            debug = true;
-        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            usage();
-            return 0;
-        } else if (argv[i][0] != '-') {
-            strncpy(media_path, argv[i], sizeof(media_path) - 1);
-        }
-    }
-    
-    if (strlen(media_path) == 0) {
-        fprintf(stderr, NAME ": Error: No media file or directory specified\n");
-        usage();
-        return 1;
-    }
+   int i;
+   bool daemon_mode = false;
+   char media_path[MAX_PATH] = {0};
    
-   // Daemonize if requested
-   if (daemon_mode) {
-       pid_t pid = fork();
-       if (pid < 0) {
-           perror("fork");
-           exit(1);
-       }
-       if (pid > 0) {
-           printf("MotionWall daemon started with PID: %d\n", pid);
-           exit(0);
-       }
-       
-       umask(0);
-       if (setsid() < 0) {
-           exit(1);
-       }
-       
-       if (chdir("/") < 0) {
-           if (debug) perror("chdir");
-       }
-       if (!debug) {
-           close(STDIN_FILENO);
-           close(STDOUT_FILENO);
-           close(STDERR_FILENO);
-       }
-   }
+   // Initialize configuration with defaults
+   strcpy(config.media_player, "mpv");
+   config.media_playlist.duration = 30;
+   config.media_playlist.shuffle = false;
+   config.media_playlist.loop = true;
+   config.multi_monitor = false;
+   config.auto_resolution = true;
+   config.playlist_mode = false;
+   config.compositor_aware = false;
    
-   // Initialize random seed for shuffle
-   srand(time(NULL));
-   
-   // Initialize X11
-   init_x11();
-   
-   // Detect desktop environment
-   detect_desktop_environment();
-   
-   // Detect monitors
-   if (!detect_monitors()) {
-       fprintf(stderr, NAME ": Error: No monitors detected\n");
-       return 1;
-   }
-   
-   // Setup compositor integration
-   setup_compositor_integration();
-   
-   // Create playlist
-   create_playlist(media_path);
-   if (config.media_playlist.count == 0) {
-       fprintf(stderr, NAME ": Error: No compatible media files found\n");
-       return 1;
-   }
-   
-   // Determine how many windows to create
-   if (config.multi_monitor) {
-       config.window_count = config.monitors.count;
-   } else {
-       config.window_count = 1;
-   }
-   
-   // Allocate memory for windows and child PIDs
-   config.windows = calloc(config.window_count, sizeof(window_info));
-   child_pids = calloc(config.window_count * 2, sizeof(pid_t)); // Extra space for playlist changes
-   
-   if (!config.windows || !child_pids) {
-       fprintf(stderr, NAME ": Error: Memory allocation failed\n");
-       return 1;
-   }
-   
-   // Set up signal handlers
-   signal(SIGTERM, signal_handler);
-   signal(SIGINT, signal_handler);
-   signal(SIGCHLD, SIG_IGN); // Prevent zombie processes
-   
-   // Create windows for each monitor (or just primary)
-   if (config.multi_monitor) {
-       for (i = 0; i < config.monitors.count; i++) {
-           create_window_for_monitor(i);
-       }
-   } else {
-       // Use primary monitor only
-       int primary = config.monitors.primary_index;
-       if (primary == -1) primary = 0;
-       create_window_for_monitor(primary);
-   }
-   
-   // Start media players
-   for (i = 0; i < config.window_count; i++) {
-       start_media_player(i);
-   }
-   
-   // Save current configuration
-   save_config_file();
-   
-   if (debug) {
-       fprintf(stderr, NAME ": Setup complete. Running with %d window(s).\n", config.window_count);
-   }
-   
-   // Main loop for playlist management
-   time_t last_change = time(NULL);
-   int status;
-   
-   while (1) {
-       // Check for dead children and restart if needed
-       for (i = 0; i < child_count; i++) {
-           if (child_pids[i] > 0) {
-               pid_t result = waitpid(child_pids[i], &status, WNOHANG);
-               if (result > 0) {
-                   if (debug) {
-                       fprintf(stderr, NAME ": Child process %d exited\n", child_pids[i]);
-                   }
-                   child_pids[i] = 0;
-                   
-                   // Restart if not intentional exit
-                   if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-                       // Find which window this was for and restart
-                       for (int j = 0; j < config.window_count; j++) {
-                           start_media_player(j);
-                           break;
-                       }
-                   }
-               }
+   // Load default config - CORREGIDO
+   const char *home = getenv("HOME");
+   if (home) {
+       char default_config[MAX_PATH];
+       if (safe_path_join(default_config, sizeof(default_config), home, CONFIG_DIR)) {
+           char config_file[MAX_PATH];
+           if (safe_path_join(config_file, sizeof(config_file), default_config, "config")) {
+               load_config_file(config_file);
            }
        }
-       
-       // Handle playlist changes
-       if (config.media_playlist.count > 1 && config.media_playlist.duration > 0) {
-           time_t now = time(NULL);
-           if (now - last_change >= config.media_playlist.duration) {
-               // Kill current players
-               for (i = 0; i < child_count; i++) {
-                   if (child_pids[i] > 0) {
-                       kill(child_pids[i], SIGTERM);
-                       waitpid(child_pids[i], NULL, 0);
-                       child_pids[i] = 0;
-                   }
-               }
-               child_count = 0;
-               
-               // Switch to next in playlist
-               playlist_next();
-               
-               // Restart players with new media
-               for (i = 0; i < config.window_count; i++) {
-                   start_media_player(i);
-               }
-               
-               last_change = now;
-           }
-       }
-       
-       // Process X11 events
-       while (XPending(display)) {
-           XEvent event;
-           XNextEvent(display, &event);
-           
-           switch (event.type) {
-               case ConfigureNotify: {
-                   // Handle window configuration changes
-                   XConfigureEvent *ce = &event.xconfigure;
-                   
-                   // Find which window was configured
-                   for (int i = 0; i < config.window_count; i++) {
-                       if (config.windows[i].window == ce->window) {
-                           // Check if size changed
-                           if (ce->width != (int)config.windows[i].width || 
-                               ce->height != (int)config.windows[i].height) {
-                               
-                               config.windows[i].width = ce->width;
-                               config.windows[i].height = ce->height;
-                               config.windows[i].x = ce->x;
-                               config.windows[i].y = ce->y;
-                               
-                               if (debug) {
-                                   fprintf(stderr, NAME ": Window %d resized to %dx%d+%d+%d\n",
-                                           i, ce->width, ce->height, ce->x, ce->y);
-                               }
-                               
-                               // Restart media player with new dimensions
-                               if (child_pids[i] > 0) {
-                                   kill(child_pids[i], SIGTERM);
-                                   waitpid(child_pids[i], NULL, 0);
-                                   child_pids[i] = 0;
-                               }
-                               
-                               // Small delay before restart
-                               usleep(500000);
-                               start_media_player(i);
-                           }
-                           break;
-                       }
-                   }
-                   break;
-               }
-               
-               case Expose: {
-                   // Handle expose events
-                   XExposeEvent *ee = &event.xexpose;
-                   
-                   // Only handle if this is the last expose event in the sequence
-                   if (ee->count == 0) {
-                       for (int i = 0; i < config.window_count; i++) {
-                           if (config.windows[i].window == ee->window) {
-                               // Clear the exposed area
-                               XClearArea(display, config.windows[i].window,
-                                        ee->x, ee->y, ee->width, ee->height, False);
-                               
-                               // Force window to bottom layer
-                               XLowerWindow(display, config.windows[i].window);
-                               
-                               if (debug) {
-                                   fprintf(stderr, NAME ": Expose event for window %d (%dx%d+%d+%d)\n",
-                                           i, ee->width, ee->height, ee->x, ee->y);
-                               }
-                               break;
-                           }
-                       }
-                   }
-                   break;
-               }
-               
-               case PropertyNotify: {
-                   // Handle property changes (useful for desktop environment changes)
-                   XPropertyEvent *pe = &event.xproperty;
-                   
-                   if (pe->atom == ATOM(_NET_CURRENT_DESKTOP) || 
-                       pe->atom == ATOM(_NET_DESKTOP_GEOMETRY)) {
-                       
-                       if (debug) {
-                           fprintf(stderr, NAME ": Desktop property changed, checking configuration\n");
-                       }
-                       
-                       // Re-detect monitors in case of configuration change
-                       int old_count = config.monitors.count;
-                       detect_monitors();
-                       
-                       if (config.monitors.count != old_count) {
-                           if (debug) {
-                               fprintf(stderr, NAME ": Monitor configuration changed (%d -> %d)\n",
-                                       old_count, config.monitors.count);
-                           }
-                           
-                           // TODO: Handle monitor configuration changes
-                           // This would involve recreating windows for new monitor setup
-                       }
-                   }
-                   break;
-               }
-               
-               case DestroyNotify: {
-                   // Handle window destruction
-                   XDestroyWindowEvent *de = &event.xdestroywindow;
-                   
-                   for (int i = 0; i < config.window_count; i++) {
-                       if (config.windows[i].window == de->window) {
-                           if (debug) {
-                               fprintf(stderr, NAME ": Window %d was destroyed\n", i);
-                           }
-                           
-                           // Mark window as invalid
-                           config.windows[i].window = None;
-                           
-                           // Kill associated media player
-                           if (child_pids[i] > 0) {
-                               kill(child_pids[i], SIGTERM);
-                               child_pids[i] = 0;
-                           }
-                           break;
-                       }
-                   }
-                   break;
-               }
-               
-               case VisibilityNotify: {
-                   // Handle visibility changes
-                   XVisibilityEvent *ve = &event.xvisibility;
-                   
-                   for (int i = 0; i < config.window_count; i++) {
-                       if (config.windows[i].window == ve->window) {
-                           if (ve->state == VisibilityFullyObscured) {
-                               if (debug) {
-                                   fprintf(stderr, NAME ": Window %d fully obscured\n", i);
-                               }
-                               // Optionally pause media player to save resources
-                           } else if (ve->state == VisibilityUnobscured) {
-                               if (debug) {
-                                   fprintf(stderr, NAME ": Window %d unobscured\n", i);
-                               }
-                               // Ensure window stays at bottom
-                               XLowerWindow(display, config.windows[i].window);
-                           }
-                           break;
-                       }
-                   }
-                   break;
-               }
-               
-               case ClientMessage: {
-                   // Handle client messages (useful for desktop environment communication)
-                   XClientMessageEvent *cm = &event.xclient;
-                   
-                   if (cm->message_type == ATOM(_NET_WM_STATE)) {
-                       if (debug) {
-                           fprintf(stderr, NAME ": Received WM state change message\n");
-                       }
-                       // Handle window manager state changes
-                   }
-                   break;
-               }
-               
-               default:
-                   // Handle other events if needed
-                   break;
-           }
-       }
-       
-       // Reduce CPU usage
-       usleep(10000); // 10 ms
    }
    
-   // Nunca se alcanza, pero necesario para la estructura
-   return 0;
+   // Parse command line arguments
+   for (i = 1; i < argc; i++) {
+       if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--multi-monitor") == 0) {
+           config.multi_monitor = true;
+       } else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--player") == 0) {
+           if (++i < argc) {
+               strncpy(config.media_player, argv[i], sizeof(config.media_player) - 1);
+               config.media_player[sizeof(config.media_player) - 1] = '\0';
+           }
+       } else if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--shuffle") == 0) {
+           config.media_playlist.shuffle = true;
+       } else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "--loop") == 0) {
+           config.media_playlist.loop = true;
+       } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--duration") == 0) {
+           if (++i < argc) {
+               config.media_playlist.duration = atoi(argv[i]);
+           }
+       } else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--config") == 0) {
+           if (++i < argc) {
+               load_config_file(argv[i]);
+           }
+       } else if (strcmp(argv[i], "--auto-res") == 0) {
+           config.auto_resolution = true;
+       } else if (strcmp(argv[i], "--daemon") == 0) {
+           daemon_mode = true;
+       } else if (strcmp(argv[i], "--debug") == 0) {
+           debug = true;
+       } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+           usage();
+           return 0;
+       } else if (argv[i][0] != '-') {
+           strncpy(media_path, argv[i], sizeof(media_path) - 1);
+           media_path[sizeof(media_path) - 1] = '\0';
+       }
+   }
+   
+   if (strlen(media_path) == 0) {
+       fprintf(stderr, NAME ": Error: No media file or directory specified\n");
+       usage();
+       return 1;
+   }
+  
+  // Daemonize if requested
+  if (daemon_mode) {
+      pid_t pid = fork();
+      if (pid < 0) {
+          perror("fork");
+          exit(1);
+      }
+      if (pid > 0) {
+          printf("MotionWall daemon started with PID: %d\n", pid);
+          exit(0);
+      }
+      
+      umask(0);
+      if (setsid() < 0) {
+          exit(1);
+      }
+      
+      if (chdir("/") < 0) {
+          if (debug) perror("chdir");
+      }
+      if (!debug) {
+          close(STDIN_FILENO);
+          close(STDOUT_FILENO);
+          close(STDERR_FILENO);
+      }
+  }
+  
+  // Initialize random seed for shuffle
+  srand(time(NULL));
+  
+  // Initialize X11
+  init_x11();
+  
+  // Detect desktop environment
+  detect_desktop_environment();
+  
+  // Detect monitors
+  if (!detect_monitors()) {
+      fprintf(stderr, NAME ": Error: No monitors detected\n");
+      return 1;
+  }
+  
+  // Create playlist
+  create_playlist(media_path);
+  if (config.media_playlist.count == 0) {
+      fprintf(stderr, NAME ": Error: No compatible media files found\n");
+      return 1;
+  }
+  
+  // Determine how many windows to create
+  if (config.multi_monitor) {
+      config.window_count = config.monitors.count;
+  } else {
+      config.window_count = 1;
+  }
+  
+  // Allocate memory for windows and child PIDs
+  config.windows = calloc(config.window_count, sizeof(window_info));
+  child_pids = calloc(config.window_count * 2, sizeof(pid_t)); // Extra space for playlist changes
+  
+  if (!config.windows || !child_pids) {
+      fprintf(stderr, NAME ": Error: Memory allocation failed\n");
+      return 1;
+  }
+  
+  // Set up signal handlers
+  signal(SIGTERM, signal_handler);
+  signal(SIGINT, signal_handler);
+  signal(SIGCHLD, SIG_IGN); // Prevent zombie processes
+  
+  // Create windows for each monitor (or just primary)
+  if (config.multi_monitor) {
+      for (i = 0; i < config.monitors.count; i++) {
+          create_window_for_monitor(i);
+      }
+  } else {
+      // Use primary monitor only
+      int primary = config.monitors.primary_index;
+      if (primary == -1) primary = 0;
+      create_window_for_monitor(primary);
+  }
+  
+  // Setup compositor integration AFTER windows are created
+  setup_compositor_integration();
+  
+  // Start media players
+  for (i = 0; i < config.window_count; i++) {
+      start_media_player(i);
+  }
+  
+  // Save current configuration
+  save_config_file();
+  
+  if (debug) {
+      fprintf(stderr, NAME ": Setup complete. Running with %d window(s).\n", config.window_count);
+  }
+  
+  // Main loop for playlist management
+  time_t last_change = time(NULL);
+  int status;
+  
+  while (1) {
+      // Check for dead children and restart if needed
+      for (i = 0; i < child_count; i++) {
+          if (child_pids[i] > 0) {
+              pid_t result = waitpid(child_pids[i], &status, WNOHANG);
+              if (result > 0) {
+                  if (debug) {
+                      fprintf(stderr, NAME ": Child process %d exited\n", child_pids[i]);
+                  }
+                  child_pids[i] = 0;
+                  
+                  // Restart if not intentional exit
+                  if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                      // Find which window this was for and restart
+                      for (int j = 0; j < config.window_count; j++) {
+                          start_media_player(j);
+                          break;
+                      }
+                  }
+              }
+          }
+      }
+      
+      // Handle playlist changes
+      if (config.media_playlist.count > 1 && config.media_playlist.duration > 0) {
+          time_t now = time(NULL);
+          if (now - last_change >= config.media_playlist.duration) {
+              // Kill current players
+              for (i = 0; i < child_count; i++) {
+                  if (child_pids[i] > 0) {
+                      kill(child_pids[i], SIGTERM);
+                      waitpid(child_pids[i], NULL, 0);
+                      child_pids[i] = 0;
+                  }
+              }
+              child_count = 0;
+              
+              // Switch to next in playlist
+              playlist_next();
+              
+              // Restart players with new media
+              for (i = 0; i < config.window_count; i++) {
+                  start_media_player(i);
+              }
+              
+              last_change = now;
+          }
+      }
+      
+      // Process X11 events
+      while (XPending(display)) {
+          XEvent event;
+          XNextEvent(display, &event);
+          
+          switch (event.type) {
+              case ConfigureNotify: {
+                  // Handle window configuration changes
+                  XConfigureEvent *ce = &event.xconfigure;
+                  
+                  // Find which window was configured
+                  for (int j = 0; j < config.window_count; j++) {
+                      if (config.windows[j].window == ce->window) {
+                          // Check if size changed
+                          if (ce->width != (int)config.windows[j].width || 
+                              ce->height != (int)config.windows[j].height) {
+                              
+                              config.windows[j].width = ce->width;
+                              config.windows[j].height = ce->height;
+                              config.windows[j].x = ce->x;
+                              config.windows[j].y = ce->y;
+                              
+                              if (debug) {
+                                  fprintf(stderr, NAME ": Window %d resized to %dx%d+%d+%d\n",
+                                          j, ce->width, ce->height, ce->x, ce->y);
+                              }
+                              
+                              // Restart media player with new dimensions
+                              for (int k = 0; k < child_count; k++) {
+                                  if (child_pids[k] > 0) {
+                                      kill(child_pids[k], SIGTERM);
+                                      waitpid(child_pids[k], NULL, 0);
+                                      child_pids[k] = 0;
+                                  }
+                              }
+                              child_count = 0;
+                              
+                              // Small delay before restart
+                              usleep(500000);
+                              start_media_player(j);
+                          }
+                          break;
+                      }
+                  }
+                  break;
+              }
+              
+              case Expose: {
+                  // Handle expose events
+                  XExposeEvent *ee = &event.xexpose;
+                  
+                  // Only handle if this is the last expose event in the sequence
+                  if (ee->count == 0) {
+                      for (int j = 0; j < config.window_count; j++) {
+                          if (config.windows[j].window == ee->window) {
+                              // Clear the exposed area
+                              XClearArea(display, config.windows[j].window,
+                                       ee->x, ee->y, ee->width, ee->height, False);
+                              
+                              // Force window to bottom layer
+                              XLowerWindow(display, config.windows[j].window);
+                              
+                              if (debug) {
+                                  fprintf(stderr, NAME ": Expose event for window %d (%dx%d+%d+%d)\n",
+                                          j, ee->width, ee->height, ee->x, ee->y);
+                              }
+                              break;
+                          }
+                      }
+                  }
+                  break;
+              }
+              
+              case PropertyNotify: {
+                  // Handle property changes (useful for desktop environment changes)
+                  XPropertyEvent *pe = &event.xproperty;
+                  
+                  if (pe->atom == ATOM(_NET_CURRENT_DESKTOP) || 
+                      pe->atom == ATOM(_NET_DESKTOP_GEOMETRY)) {
+                      
+                      if (debug) {
+                          fprintf(stderr, NAME ": Desktop property changed, checking configuration\n");
+                      }
+                      
+                      // Re-detect monitors in case of configuration change
+                      int old_count = config.monitors.count;
+                      detect_monitors();
+                      
+                      if (config.monitors.count != old_count) {
+                          if (debug) {
+                              fprintf(stderr, NAME ": Monitor configuration changed (%d -> %d)\n",
+                                      old_count, config.monitors.count);
+                          }
+                          
+                          // TODO: Handle monitor configuration changes
+                          // This would involve recreating windows for new monitor setup
+                      }
+                  }
+                  break;
+              }
+              
+              case DestroyNotify: {
+                  // Handle window destruction
+                  XDestroyWindowEvent *de = &event.xdestroywindow;
+                  
+                  for (int j = 0; j < config.window_count; j++) {
+                      if (config.windows[j].window == de->window) {
+                          if (debug) {
+                              fprintf(stderr, NAME ": Window %d was destroyed\n", j);
+                          }
+                          
+                          // Mark window as invalid
+                          config.windows[j].window = None;
+                          
+                          // Kill associated media player
+                          for (int k = 0; k < child_count; k++) {
+                              if (child_pids[k] > 0) {
+                                  kill(child_pids[k], SIGTERM);
+                                  child_pids[k] = 0;
+                              }
+                          }
+                          break;
+                      }
+                  }
+                  break;
+              }
+              
+              case VisibilityNotify: {
+                  // Handle visibility changes
+                  XVisibilityEvent *ve = &event.xvisibility;
+                  
+                  for (int j = 0; j < config.window_count; j++) {
+                      if (config.windows[j].window == ve->window) {
+                          if (ve->state == VisibilityFullyObscured) {
+                              if (debug) {
+                                  fprintf(stderr, NAME ": Window %d fully obscured\n", j);
+                              }
+                              // Optionally pause media player to save resources
+                          } else if (ve->state == VisibilityUnobscured) {
+                              if (debug) {
+                                  fprintf(stderr, NAME ": Window %d unobscured\n", j);
+                              }
+                              // Ensure window stays at bottom
+                              XLowerWindow(display, config.windows[j].window);
+                          }
+                          break;
+                      }
+                  }
+                  break;
+              }
+              
+              case ClientMessage: {
+                  // Handle client messages (useful for desktop environment communication)
+                  XClientMessageEvent *cm = &event.xclient;
+                  
+                  if (cm->message_type == ATOM(_NET_WM_STATE)) {
+                      if (debug) {
+                          fprintf(stderr, NAME ": Received WM state change message\n");
+                      }
+                      // Handle window manager state changes
+                  }
+                  break;
+              }
+              
+              default:
+                  // Handle other events if needed
+                  break;
+          }
+      }
+      
+      // Reduce CPU usage
+      usleep(10000); // 10 ms
+  }
+  
+  // Never reached, but needed for structure
+  return 0;
 }
