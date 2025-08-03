@@ -40,6 +40,7 @@
 #include <time.h>
 #include <glob.h>
 #include <libgen.h>
+#include <errno.h>
 
 #define NAME "motionwall"
 #define VERSION "1.0.0"
