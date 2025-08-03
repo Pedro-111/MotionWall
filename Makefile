@@ -25,7 +25,7 @@ $(TARGET): $(OBJECTS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 install: $(TARGET)
 	$(INSTALL) -d -m 755 '$(DESTDIR)$(BINDIR)'
