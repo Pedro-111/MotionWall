@@ -17,6 +17,8 @@
  * appear in supporting documentation.
  */
 
+#define _XOPEN_SOURCE 500  // Para usleep
+
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
@@ -143,7 +145,7 @@ static void save_config_file(void);
 static void detect_desktop_environment(void) {
     const char *desktop = getenv("XDG_CURRENT_DESKTOP");
     const char *session = getenv("DESKTOP_SESSION");
-    const char *gdm = getenv("GDMSESSION");
+    // Eliminada variable 'gdm' no utilizada
     
     config.de = DE_UNKNOWN;
     
@@ -303,8 +305,7 @@ static void setup_compositor_integration(void) {
                 // Set GNOME-specific window properties
                 Atom gnome_panel_atom = ATOM(_GNOME_PANEL_DESKTOP_AREA);
                 if (gnome_panel_atom != None) {
-                    // Respect GNOME panel areas
-                    long desktop_area[4];
+                    // Eliminada variable 'desktop_area' no utilizada
                     Atom actual_type;
                     int actual_format;
                     unsigned long nitems, bytes_after;
@@ -316,12 +317,12 @@ static void setup_compositor_integration(void) {
                                  &bytes_after, &prop_data) == Success) {
                         
                         if (prop_data && nitems == 4) {
-                            long *area = (long*)prop_data;
+                            // Solo para debug, no se usa para nada más
                             if (debug) {
+                                long *area = (long*)prop_data;
                                 fprintf(stderr, NAME ": GNOME desktop area: %ldx%ld+%ld+%ld\n",
                                         area[2], area[3], area[0], area[1]);
                             }
-                            // Adjust window positions to respect panels
                         }
                         if (prop_data) XFree(prop_data);
                     }
@@ -521,13 +522,11 @@ static void setup_compositor_integration(void) {
         }
 
         // Additional compositor detection and optimization
-        Window comp_window = XGetSelectionOwner(display, ATOM(_NET_WM_CM_S0));
+        comp_window = XGetSelectionOwner(display, ATOM(_NET_WM_CM_S0));
         if (comp_window != None) {
             if (debug) fprintf(stderr, NAME ": Compositor detected, applying additional optimizations\n");
             
-            // Query compositor capabilities
-            Atom comp_atom = ATOM(_NET_WM_CM_S0);
-            
+            // Eliminada variable 'comp_atom' no utilizada
             for (int i = 0; i < config.window_count; i++) {
                 // Set opacity for compositor
                 Atom opacity_atom = ATOM(_NET_WM_WINDOW_OPACITY);
@@ -1006,7 +1005,9 @@ int main(int argc, char **argv) {
            exit(1);
        }
        
-       chdir("/");
+       if (chdir("/") < 0) {  // Ignorar el resultado
+           // Podríamos imprimir un mensaje de error en modo debug
+       }
        if (!debug) {
            close(STDIN_FILENO);
            close(STDOUT_FILENO);
@@ -1305,4 +1306,7 @@ int main(int argc, char **argv) {
        // Reduce CPU usage
        usleep(10000); // 10 ms
    }
+   
+   // Nunca se alcanza, pero necesario para la estructura
+   return 0;
 }
