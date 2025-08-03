@@ -481,7 +481,7 @@ static void start_media_player(int window_index) {
         return;
     }
     
-    int ret = snprintf(wid_arg, sizeof(wid_arg), "0x%lx", config.windows[window_index].window);
+    int ret = snprintf(wid_arg, sizeof(wid_arg), "--wid=0x%lx", config.windows[window_index].window);
     if (ret >= (int)sizeof(wid_arg)) {
         fprintf(stderr, NAME ": Error: Window ID too long\n");
         return;
@@ -492,19 +492,22 @@ static void start_media_player(int window_index) {
     
     // Add player-specific arguments
     if (strstr(config.media_player, "mpv")) {
-        args[argc++] = "--wid";
-        args[argc++] = wid_arg;
+        args[argc++] = wid_arg;  // Ya incluye --wid=0x...
         args[argc++] = "--really-quiet";
         args[argc++] = "--no-audio";
-        args[argc++] = "--loop-file";
-        args[argc++] = config.media_playlist.loop ? "inf" : "no";
+        args[argc++] = "--loop-file=inf";  // Formato correcto
         args[argc++] = "--panscan=1.0";
         args[argc++] = "--keepaspect=no";
         args[argc++] = "--no-input-default-bindings";
         args[argc++] = "--no-osc";
+        args[argc++] = "--no-input-cursor";
+        args[argc++] = "--no-cursor-autohide";
+        args[argc++] = "--hwdec=auto";
     } else if (strstr(config.media_player, "mplayer")) {
         args[argc++] = "-wid";
-        args[argc++] = wid_arg;
+        char wid_simple[32];
+        snprintf(wid_simple, sizeof(wid_simple), "0x%lx", config.windows[window_index].window);
+        args[argc++] = wid_simple;
         args[argc++] = "-nosound";
         args[argc++] = "-quiet";
         args[argc++] = "-panscan";
@@ -519,8 +522,9 @@ static void start_media_player(int window_index) {
         args[argc++] = "dummy";
         args[argc++] = "--no-audio";
         args[argc++] = "--quiet";
-        args[argc++] = "--drawable-xid";
-        args[argc++] = wid_arg;
+        char drawable_arg[64];
+        snprintf(drawable_arg, sizeof(drawable_arg), "--drawable-xid=0x%lx", config.windows[window_index].window);
+        args[argc++] = drawable_arg;
         if (config.media_playlist.loop) {
             args[argc++] = "--loop";
         }
@@ -533,6 +537,15 @@ static void start_media_player(int window_index) {
     } else {
         fprintf(stderr, NAME ": Error: Too many command arguments\n");
         return;
+    }
+    
+    // Debug: print the complete command line
+    if (debug) {
+        fprintf(stderr, NAME ": Command line: ");
+        for (int i = 0; i < argc; i++) {
+            fprintf(stderr, "%s ", args[i]);
+        }
+        fprintf(stderr, "\n");
     }
     
     pid_t pid = fork();
