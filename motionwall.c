@@ -157,6 +157,23 @@ static void force_windows_to_background(void);
 static bool screen_config_changed = false;
 static int xrandr_event_base = 0;
 static int xrandr_error_base = 0;
+
+// Definir constantes XRandR si no están disponibles
+#ifndef RRScreenChangeNotify
+#define RRScreenChangeNotify 0
+#endif
+
+#ifndef RRCrtcChangeNotify  
+#define RRCrtcChangeNotify 1
+#endif
+
+#ifndef RROutputChangeNotify
+#define RROutputChangeNotify 2
+#endif
+
+#ifndef RRNumberEvents
+#define RRNumberEvents 3
+#endif
 // Función para crear archivo de lock de instancia única
 static int create_lock_file(void) {
     int fd = open("/tmp/motionwall.lock", O_CREAT | O_RDWR, 0666);
