@@ -1091,47 +1091,7 @@ static void cleanup_and_exit(void) {
    
    exit(0);
 }
-static void log_monitor_changes(monitor_setup *old_setup, monitor_setup *new_setup) {
-    if (!debug) return;
-    
-    fprintf(stderr, NAME ": Monitor configuration changes:\n");
-    
-    // Monitores que cambiaron
-    for (int i = 0; i < new_setup->count && i < old_setup->count; i++) {
-        monitor_info *old_mon = &old_setup->monitors[i];
-        monitor_info *new_mon = &new_setup->monitors[i];
-        
-        if (old_mon->width != new_mon->width || old_mon->height != new_mon->height) {
-            fprintf(stderr, "  %s: %dx%d -> %dx%d\n", 
-                    new_mon->name, old_mon->width, old_mon->height,
-                    new_mon->width, new_mon->height);
-        }
-        
-        if (old_mon->x != new_mon->x || old_mon->y != new_mon->y) {
-            fprintf(stderr, "  %s: position %d,%d -> %d,%d\n",
-                    new_mon->name, old_mon->x, old_mon->y,
-                    new_mon->x, new_mon->y);
-        }
-    }
-    
-    // Monitores nuevos
-    if (new_setup->count > old_setup->count) {
-        for (int i = old_setup->count; i < new_setup->count; i++) {
-            monitor_info *mon = &new_setup->monitors[i];
-            fprintf(stderr, "  Added: %s (%dx%d+%d+%d)\n",
-                    mon->name, mon->width, mon->height, mon->x, mon->y);
-        }
-    }
-    
-    // Monitores removidos
-    if (old_setup->count > new_setup->count) {
-        for (int i = new_setup->count; i < old_setup->count; i++) {
-            monitor_info *mon = &old_setup->monitors[i];
-            fprintf(stderr, "  Removed: %s (%dx%d+%d+%d)\n",
-                    mon->name, mon->width, mon->height, mon->x, mon->y);
-        }
-    }
-}
+
 // Configuration file support
 static void load_config_file(const char *config_path) {
    FILE *file = fopen(config_path, "r");
