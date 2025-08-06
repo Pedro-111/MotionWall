@@ -10,6 +10,7 @@
  * - Better compositor integration
  * - Seamless video transitions
  * - Configuration file support
+ * - Per-monitor different content support
  * 
  * Permission to use, copy, modify, distribute, and sell this software
  * and its documentation for any purpose is hereby granted without
@@ -46,7 +47,7 @@
 #include <fcntl.h>
 
 #define NAME "motionwall"
-#define VERSION "1.0.1"
+#define VERSION "1.0.2"
 #define CONFIG_DIR ".config/motionwall"
 #define MAX_MONITORS 16
 #define MAX_PLAYLIST 1024
@@ -116,11 +117,13 @@ typedef struct {
     int y;
     int monitor_id;
     pid_t player_pid;
-    pid_t next_player_pid;  // PID del siguiente reproductor para transiciones suaves
+    pid_t fade_pid;  // PID for fade transition process
     bool player_active;
-    bool next_player_active;
+    bool fade_active;
     time_t player_start_time;
     bool needs_resize;
+    playlist *monitor_playlist;  // Playlist específica para este monitor
+    int playlist_index;         // Índice actual en la playlist del monitor
 } window_info;
 
 typedef struct {
@@ -128,7 +131,8 @@ typedef struct {
     bool auto_resolution;
     bool playlist_mode;
     bool compositor_aware;
-    bool seamless_transitions;  // Nueva opción para transiciones suaves
+    bool seamless_transitions;
+    bool per_monitor_content;   // Nueva opción para contenido diferente por monitor
     char config_file[MAX_PATH];
     char media_player[256];
     char player_args[1024];
@@ -137,6 +141,8 @@ typedef struct {
     monitor_setup monitors;
     window_info *windows;
     int window_count;
+    char **monitor_paths;       // Array de paths para cada monitor
+    int monitor_path_count;
 } motionwall_config;
 
 static motionwall_config config = {0};
@@ -149,17 +155,18 @@ static bool check_monitor_changes(void);
 static void handle_screen_resize(void);
 static void resize_window_for_monitor(int window_index, int monitor_id);
 static void create_playlist(const char *path);
+static void create_monitor_playlists(char **paths, int path_count);
 static void setup_compositor_integration(void);
 static void create_window_for_monitor(int monitor_id);
 static void start_media_player(int window_index);
-static void start_next_media_player(int window_index);
-static void switch_to_next_player(int window_index);
+static void start_fade_transition(int window_index, const char *next_file);
 static void check_and_restart_players(void);
 static void terminate_all_players(void);
 static void terminate_player(int window_index);
-static void terminate_next_player(int window_index);
+static void terminate_fade_process(int window_index);
 static bool is_process_healthy(pid_t pid);
 static void playlist_next(void);
+static void monitor_playlist_next(int window_index);
 static void signal_handler(int sig);
 static void cleanup_and_exit(void);
 static void load_config_file(const char *config_path);
@@ -312,7 +319,7 @@ static void handle_screen_resize(void) {
     }
     
     // Forzar ventanas al fondo después del redimensionamiento
-    usleep(500000); // 500ms para que se estabilicen
+    usleep(500000);
     force_windows_to_background();
 }
 
@@ -358,7 +365,7 @@ static void resize_window_for_monitor(int window_index, int monitor_id) {
     XSetWMNormalHints(display, win->window, &size_hints);
     
     XSync(display, False);
-    win->needs_resize = true; // Marcar para que el reproductor se ajuste
+    win->needs_resize = true;
 }
 
 // Verificar si un proceso está saludable
@@ -397,7 +404,7 @@ static void terminate_player(int window_index) {
         }
         
         kill(win->player_pid, SIGTERM);
-        usleep(500000);
+        usleep(300000);
         
         if (kill(win->player_pid, 0) == 0) {
             if (debug) {
@@ -414,31 +421,31 @@ static void terminate_player(int window_index) {
     }
 }
 
-// Terminar reproductor siguiente
-static void terminate_next_player(int window_index) {
+// Terminar proceso de transición fade
+static void terminate_fade_process(int window_index) {
     if (window_index < 0 || window_index >= config.window_count) {
         return;
     }
     
     window_info *win = &config.windows[window_index];
     
-    if (win->next_player_active && win->next_player_pid > 0) {
+    if (win->fade_active && win->fade_pid > 0) {
         if (debug) {
-            fprintf(stderr, NAME ": Terminating next player PID %d for window %d\n", 
-                    win->next_player_pid, window_index);
+            fprintf(stderr, NAME ": Terminating fade process PID %d for window %d\n", 
+                    win->fade_pid, window_index);
         }
         
-        kill(win->next_player_pid, SIGTERM);
+        kill(win->fade_pid, SIGTERM);
         usleep(200000);
         
-        if (kill(win->next_player_pid, 0) == 0) {
-            kill(win->next_player_pid, SIGKILL);
+        if (kill(win->fade_pid, 0) == 0) {
+            kill(win->fade_pid, SIGKILL);
         }
         
-        waitpid(win->next_player_pid, NULL, WNOHANG);
+        waitpid(win->fade_pid, NULL, WNOHANG);
         
-        win->next_player_pid = 0;
-        win->next_player_active = false;
+        win->fade_pid = 0;
+        win->fade_active = false;
     }
 }
 
@@ -450,93 +457,83 @@ static void terminate_all_players(void) {
     
     for (int i = 0; i < config.window_count; i++) {
         terminate_player(i);
-        terminate_next_player(i);
+        terminate_fade_process(i);
     }
     
     usleep(200000);
 }
 
-// Iniciar reproductor siguiente para transición suave
-static void start_next_media_player(int window_index) {
-    if (!config.seamless_transitions) {
-        return;
-    }
-    
-    if (window_index < 0 || window_index >= config.window_count) {
+// Iniciar transición suave con fade
+static void start_fade_transition(int window_index, const char *next_file) {
+    if (!config.seamless_transitions || window_index < 0 || window_index >= config.window_count) {
         return;
     }
     
     window_info *win = &config.windows[window_index];
     
-    if (win->next_player_active && win->next_player_pid > 0) {
-        if (is_process_healthy(win->next_player_pid)) {
-            return; // Ya hay un reproductor siguiente saludable
-        } else {
-            terminate_next_player(window_index);
-        }
+    if (win->fade_active) {
+        terminate_fade_process(window_index);
     }
     
-    if (config.media_playlist.count <= 1) {
-        return; // No hay siguiente video
-    }
-    
-    // Calcular el siguiente índice de playlist
-    int next_index;
-    if (config.media_playlist.shuffle) {
-        next_index = rand() % config.media_playlist.count;
-    } else {
-        next_index = (config.media_playlist.current + 1) % config.media_playlist.count;
-    }
-    
-    if (win->window == None) {
-        return;
-    }
-    
-    char wid_arg[64];
-    char *args[MAX_CMD_ARGS];
-    int argc = 0;
-    
-    snprintf(wid_arg, sizeof(wid_arg), "0x%lx", win->window);
-    
-    // Build command line para el siguiente reproductor
-    args[argc++] = config.media_player;
-    
-    if (strstr(config.media_player, "mpv")) {
-        char mpv_wid_arg[64];
-        snprintf(mpv_wid_arg, sizeof(mpv_wid_arg), "--wid=0x%lx", win->window);
-        args[argc++] = mpv_wid_arg;
-        args[argc++] = "--really-quiet";
-        args[argc++] = "--no-audio";
-        args[argc++] = "--loop-file=no"; // No loop para transiciones
-        args[argc++] = "--panscan=1.0";
-        args[argc++] = "--keepaspect=no";
-        args[argc++] = "--no-input-default-bindings";
-        args[argc++] = "--no-osc";
-        args[argc++] = "--no-input-cursor";
-        args[argc++] = "--no-cursor-autohide";
-        args[argc++] = "--hwdec=auto";
-        args[argc++] = "--no-terminal";
-        args[argc++] = "--no-config";
-        args[argc++] = "--pause"; // Iniciar pausado
-    } else {
-        // Para otros reproductores, usar configuración estándar
-        return; // Solo MPV soporta inicio pausado de manera confiable
-    }
-    
-    if (argc < MAX_CMD_ARGS - 1) {
-        args[argc++] = config.media_playlist.paths[next_index];
-        args[argc] = NULL;
-    } else {
+    if (win->window == None || !next_file) {
         return;
     }
     
     if (debug) {
-        fprintf(stderr, NAME ": Pre-loading next video for window %d: %s\n", 
-                window_index, config.media_playlist.paths[next_index]);
+        fprintf(stderr, NAME ": Starting fade transition for window %d to: %s\n", 
+                window_index, next_file);
     }
     
-    pid_t pid = fork();
-    if (pid == 0) {
+    // Crear un script temporal para la transición suave
+    char script_path[256];
+    snprintf(script_path, sizeof(script_path), "/tmp/motionwall_fade_%d.sh", window_index);
+    
+    FILE *script = fopen(script_path, "w");
+    if (!script) {
+        if (debug) {
+            fprintf(stderr, NAME ": Could not create fade script\n");
+        }
+        return;
+    }
+    
+    // Script para transición suave usando ffmpeg si está disponible, sino mpv simple
+    fprintf(script, "#!/bin/bash\n");
+    fprintf(script, "WID=0x%lx\n", win->window);
+    fprintf(script, "NEXT_FILE='%s'\n", next_file);
+    
+    if (strstr(config.media_player, "mpv")) {
+        // Usar mpv con fade in/out para transición suave
+        fprintf(script, "# Fade out current video\n");
+        fprintf(script, "sleep 0.2\n");
+        fprintf(script, "# Start new video with fade in\n");
+        fprintf(script, "%s --wid=$WID --really-quiet --no-audio --loop-file=inf \\\n", config.media_player);
+        fprintf(script, "  --panscan=1.0 --keepaspect=no --no-input-default-bindings \\\n");
+        fprintf(script, "  --no-osc --no-input-cursor --no-cursor-autohide \\\n");
+        fprintf(script, "  --hwdec=auto --no-terminal --no-config \\\n");
+        fprintf(script, "  --vf=fade=in:0:10 \\\n");  // Fade in effect
+        fprintf(script, "  \"$NEXT_FILE\" &\n");
+        fprintf(script, "NEW_PID=$!\n");
+        fprintf(script, "echo $NEW_PID > /tmp/motionwall_new_pid_%d\n", window_index);
+    } else {
+        // Fallback para otros reproductores
+        fprintf(script, "sleep 0.3\n");
+        fprintf(script, "%s", config.media_player);
+        if (strstr(config.media_player, "mplayer")) {
+            fprintf(script, " -wid 0x%lx -nosound -quiet -vo xv -zoom -panscan 1.0 -framedrop -cache 8192 -fs -loop 0", win->window);
+        } else if (strstr(config.media_player, "vlc")) {
+            fprintf(script, " --drawable-xid=0x%lx --intf dummy --no-video-title-show --no-audio --quiet --no-osd --loop", win->window);
+        }
+        fprintf(script, " \"$NEXT_FILE\" &\n");
+        fprintf(script, "NEW_PID=$!\n");
+        fprintf(script, "echo $NEW_PID > /tmp/motionwall_new_pid_%d\n", window_index);
+    }
+    
+    fclose(script);
+    chmod(script_path, 0755);
+    
+    // Ejecutar el script de transición
+    pid_t fade_pid = fork();
+    if (fade_pid == 0) {
         if (!debug) {
             int devnull = open("/dev/null", O_WRONLY);
             if (devnull != -1) {
@@ -547,66 +544,45 @@ static void start_next_media_player(int window_index) {
         }
         
         setsid();
-        execvp(args[0], args);
-        perror(args[0]);
+        execl("/bin/bash", "bash", script_path, NULL);
         _exit(2);
-    } else if (pid > 0) {
-        win->next_player_pid = pid;
-        win->next_player_active = true;
+    } else if (fade_pid > 0) {
+        win->fade_pid = fade_pid;
+        win->fade_active = true;
         
-        if (debug) {
-            fprintf(stderr, NAME ": Next player started (PID %d) for window %d\n", pid, window_index);
+        // Esperar a que la transición se complete
+        sleep(1);
+        
+        // Leer el PID del nuevo reproductor
+        char pid_file[256];
+        snprintf(pid_file, sizeof(pid_file), "/tmp/motionwall_new_pid_%d", window_index);
+        
+        FILE *pf = fopen(pid_file, "r");
+        if (pf) {
+            pid_t new_pid = 0;
+            if (fscanf(pf, "%d", &new_pid) == 1 && new_pid > 0) {
+                // Terminar reproductor anterior
+                if (win->player_active && win->player_pid > 0) {
+                    terminate_player(window_index);
+                }
+                
+                // Establecer nuevo reproductor
+                win->player_pid = new_pid;
+                win->player_active = true;
+                win->player_start_time = time(NULL);
+                
+                if (debug) {
+                    fprintf(stderr, NAME ": Fade transition completed, new player PID: %d\n", new_pid);
+                }
+            }
+            fclose(pf);
+            unlink(pid_file);
         }
+        
+        // Limpiar transición
+        terminate_fade_process(window_index);
+        unlink(script_path);
     }
-}
-
-// Cambiar al reproductor siguiente para transición suave
-static void switch_to_next_player(int window_index) {
-    if (!config.seamless_transitions) {
-        return;
-    }
-    
-    if (window_index < 0 || window_index >= config.window_count) {
-        return;
-    }
-    
-    window_info *win = &config.windows[window_index];
-    
-    if (!win->next_player_active || win->next_player_pid <= 0) {
-        return;
-    }
-    
-    if (debug) {
-        fprintf(stderr, NAME ": Switching to next player for window %d\n", window_index);
-    }
-    
-    // Terminar reproductor actual
-    if (win->player_active && win->player_pid > 0) {
-        terminate_player(window_index);
-    }
-    
-    // Mover reproductor siguiente a actual
-    win->player_pid = win->next_player_pid;
-    win->player_active = true;
-    win->player_start_time = time(NULL);
-    
-    // Limpiar reproductor siguiente
-    win->next_player_pid = 0;
-    win->next_player_active = false;
-    
-    // Unpause el nuevo reproductor (solo MPV)
-    if (strstr(config.media_player, "mpv")) {
-        char unpause_cmd[256];
-        snprintf(unpause_cmd, sizeof(unpause_cmd), 
-                "echo 'set pause no' | socat - /tmp/mpv-socket-%d 2>/dev/null || kill -USR1 %d 2>/dev/null",
-                win->player_pid, win->player_pid);
-        if (system(unpause_cmd) != 0 && debug) {
-            fprintf(stderr, NAME ": Could not unpause player via socket, sent USR1 signal\n");
-        }
-    }
-    
-    // Actualizar playlist
-    playlist_next();
 }
 
 // Verificar y reiniciar reproductores muertos
@@ -650,16 +626,6 @@ static void check_and_restart_players(void) {
                 fprintf(stderr, NAME ": Window %d has no active player, starting one\n", i);
             }
             start_media_player(i);
-        }
-        
-        // Verificar reproductor siguiente
-        if (win->next_player_active && win->next_player_pid > 0) {
-            if (!is_process_healthy(win->next_player_pid)) {
-                if (debug) {
-                    fprintf(stderr, NAME ": Next player for window %d is dead\n", i);
-                }
-                terminate_next_player(i);
-            }
         }
         
         // Verificar timeout del reproductor
@@ -792,17 +758,93 @@ static int detect_monitors(void) {
     return config.monitors.count;
 }
 
+// Crear playlists específicas para cada monitor
+static void create_monitor_playlists(char **paths, int path_count) {
+    if (!config.per_monitor_content || !paths || path_count == 0) {
+        return;
+    }
+    
+    if (debug) {
+        fprintf(stderr, NAME ": Creating per-monitor playlists for %d monitors\n", config.monitors.count);
+    }
+    
+    for (int monitor = 0; monitor < config.monitors.count && monitor < config.window_count; monitor++) {
+        window_info *win = &config.windows[monitor];
+       
+       // Asignar playlist específica para este monitor
+       win->monitor_playlist = malloc(sizeof(playlist));
+       if (!win->monitor_playlist) {
+           fprintf(stderr, NAME ": Error: Could not allocate playlist for monitor %d\n", monitor);
+           continue;
+       }
+       
+       memset(win->monitor_playlist, 0, sizeof(playlist));
+       
+       // Usar el path correspondiente al monitor (circular si hay menos paths que monitores)
+       const char *monitor_path = paths[monitor % path_count];
+       
+       struct stat path_stat;
+       if (stat(monitor_path, &path_stat) != 0) {
+           fprintf(stderr, NAME ": Error: Cannot access path for monitor %d: %s\n", monitor, monitor_path);
+           free(win->monitor_playlist);
+           win->monitor_playlist = NULL;
+           continue;
+       }
+       
+       if (S_ISDIR(path_stat.st_mode)) {
+           // Directory - find all video files
+           glob_t glob_result;
+           const char *extensions[] = {"*.mp4", "*.avi", "*.mkv", "*.mov", "*.webm", "*.gif", "*.mp3", "*.wav"};
+           const int ext_count = sizeof(extensions) / sizeof(extensions[0]);
+           
+           for (int ext = 0; ext < ext_count; ext++) {
+               char pattern[MAX_PATH];
+               if (!safe_path_join(pattern, sizeof(pattern), monitor_path, extensions[ext])) {
+                   continue;
+               }
+               
+               if (glob(pattern, (ext == 0) ? 0 : GLOB_APPEND, NULL, &glob_result) == 0) {
+                   for (int i = 0; i < (int)glob_result.gl_pathc && win->monitor_playlist->count < MAX_PLAYLIST; i++) {
+                       strncpy(win->monitor_playlist->paths[win->monitor_playlist->count], 
+                              glob_result.gl_pathv[i], MAX_PATH - 1);
+                       win->monitor_playlist->paths[win->monitor_playlist->count][MAX_PATH - 1] = '\0';
+                       win->monitor_playlist->count++;
+                   }
+               }
+           }
+           globfree(&glob_result);
+       } else {
+           // Single file
+           strncpy(win->monitor_playlist->paths[0], monitor_path, MAX_PATH - 1);
+           win->monitor_playlist->paths[0][MAX_PATH - 1] = '\0';
+           win->monitor_playlist->count = 1;
+       }
+       
+       // Configurar playlist
+       win->monitor_playlist->current = 0;
+       win->monitor_playlist->duration = config.media_playlist.duration;
+       win->monitor_playlist->shuffle = config.media_playlist.shuffle;
+       win->monitor_playlist->loop = config.media_playlist.loop;
+       win->playlist_index = 0;
+       
+       if (debug) {
+           fprintf(stderr, NAME ": Monitor %d playlist created with %d items from: %s\n", 
+                   monitor, win->monitor_playlist->count, monitor_path);
+       }
+   }
+}
+
 // Playlist creation from directory or file list
 static void create_playlist(const char *path) {
-    struct stat path_stat;
-    glob_t glob_result;
-    int i;
-    
-    config.media_playlist.count = 0;
-    config.media_playlist.current = 0;
-    
-    if (stat(path, &path_stat) != 0) {
-        fprintf(stderr, NAME ": Error: Cannot access path: %s\n", path);
+   struct stat path_stat;
+   glob_t glob_result;
+   int i;
+   
+   config.media_playlist.count = 0;
+   config.media_playlist.current = 0;
+   
+   if (stat(path, &path_stat) != 0) {
+       fprintf(stderr, NAME ": Error: Cannot access path: %s\n", path);
        return;
    }
    
@@ -835,7 +877,7 @@ static void create_playlist(const char *path) {
    }
    
    if (debug) {
-       fprintf(stderr, NAME ": Created playlist with %d items\n", config.media_playlist.count);
+       fprintf(stderr, NAME ": Created main playlist with %d items\n", config.media_playlist.count);
        for (i = 0; i < config.media_playlist.count; i++) {
            fprintf(stderr, "  %d: %s\n", i, config.media_playlist.paths[i]);
        }
@@ -976,11 +1018,13 @@ static void create_window_for_monitor(int monitor_id) {
    win->width = mon->width;
    win->height = mon->height;
    win->player_pid = 0;
-   win->next_player_pid = 0;
+   win->fade_pid = 0;
    win->player_active = false;
-   win->next_player_active = false;
+   win->fade_active = false;
    win->player_start_time = 0;
    win->needs_resize = false;
+   win->monitor_playlist = NULL;
+   win->playlist_index = 0;
    
    win->visual = DefaultVisual(display, screen);
    win->colourmap = DefaultColormap(display, screen);
@@ -1069,8 +1113,27 @@ static void start_media_player(int window_index) {
        }
    }
    
-   if (config.media_playlist.count == 0) {
-       fprintf(stderr, NAME ": Error: No media files in playlist\n");
+   // Determinar qué playlist usar y obtener el archivo actual
+   const char *current_file = NULL;
+   
+   if (config.per_monitor_content && win->monitor_playlist && win->monitor_playlist->count > 0) {
+       // Usar playlist específica del monitor
+       current_file = win->monitor_playlist->paths[win->monitor_playlist->current];
+       if (debug) {
+           fprintf(stderr, NAME ": Using monitor-specific file for window %d: %s\n", 
+                   window_index, current_file);
+       }
+   } else if (config.media_playlist.count > 0) {
+       // Usar playlist global
+       current_file = config.media_playlist.paths[config.media_playlist.current];
+       if (debug) {
+           fprintf(stderr, NAME ": Using global playlist file for window %d: %s\n", 
+                   window_index, current_file);
+       }
+   }
+   
+   if (!current_file) {
+       fprintf(stderr, NAME ": Error: No media files available for window %d\n", window_index);
        return;
    }
    
@@ -1128,10 +1191,8 @@ static void start_media_player(int window_index) {
        args[argc++] = "-cache";
        args[argc++] = "8192";
        args[argc++] = "-fs";
-       if (config.media_playlist.loop) {
-           args[argc++] = "-loop";
-           args[argc++] = "0";
-       }
+       args[argc++] = "-loop";
+       args[argc++] = "0";
    } else if (strstr(config.media_player, "vlc")) {
        char drawable_arg[64];
        snprintf(drawable_arg, sizeof(drawable_arg), "--drawable-xid=0x%lx", win->window);
@@ -1151,14 +1212,12 @@ static void start_media_player(int window_index) {
        args[argc++] = "--no-embedded-video";
        args[argc++] = "--video-on-top";
        args[argc++] = "--fullscreen";
-       if (config.media_playlist.loop) {
-           args[argc++] = "--loop";
-       }
+       args[argc++] = "--loop";
    }
    
    // Add current media file
    if (argc < MAX_CMD_ARGS - 1) {
-       args[argc++] = config.media_playlist.paths[config.media_playlist.current];
+       args[argc++] = (char*)current_file;
        args[argc] = NULL;
    } else {
        fprintf(stderr, NAME ": Error: Too many command arguments\n");
@@ -1198,14 +1257,7 @@ static void start_media_player(int window_index) {
        
        if (debug) {
            fprintf(stderr, NAME ": Started %s (PID %d) for window %d with file: %s\n",
-                   config.media_player, pid, window_index,
-                   config.media_playlist.paths[config.media_playlist.current]);
-       }
-       
-       // Pre-cargar siguiente video si las transiciones suaves están habilitadas
-       if (config.seamless_transitions && config.media_playlist.count > 1) {
-           usleep(2000000); // Esperar 2 segundos antes de pre-cargar
-           start_next_media_player(window_index);
+                   config.media_player, pid, window_index, current_file);
        }
    } else {
        perror("fork");
@@ -1215,7 +1267,7 @@ static void start_media_player(int window_index) {
    }
 }
 
-// Playlist management
+// Playlist management para playlist global
 static void playlist_next(void) {
    if (config.media_playlist.count <= 1) return;
    
@@ -1226,8 +1278,32 @@ static void playlist_next(void) {
    }
    
    if (debug) {
-       fprintf(stderr, NAME ": Switching to: %s\n", 
+       fprintf(stderr, NAME ": Global playlist switching to: %s\n", 
                config.media_playlist.paths[config.media_playlist.current]);
+   }
+}
+
+// Playlist management para monitor específico
+static void monitor_playlist_next(int window_index) {
+   if (window_index < 0 || window_index >= config.window_count) {
+       return;
+   }
+   
+   window_info *win = &config.windows[window_index];
+   
+   if (!win->monitor_playlist || win->monitor_playlist->count <= 1) {
+       return;
+   }
+   
+   if (win->monitor_playlist->shuffle) {
+       win->monitor_playlist->current = rand() % win->monitor_playlist->count;
+   } else {
+       win->monitor_playlist->current = (win->monitor_playlist->current + 1) % win->monitor_playlist->count;
+   }
+   
+   if (debug) {
+       fprintf(stderr, NAME ": Monitor %d playlist switching to: %s\n", 
+               window_index, win->monitor_playlist->paths[win->monitor_playlist->current]);
    }
 }
 
@@ -1255,10 +1331,27 @@ static void cleanup_and_exit(void) {
            if (config.windows[i].window != None) {
                XDestroyWindow(display, config.windows[i].window);
            }
+           
+           // Liberar playlist específica del monitor
+           if (config.windows[i].monitor_playlist) {
+               free(config.windows[i].monitor_playlist);
+               config.windows[i].monitor_playlist = NULL;
+           }
        }
        XSync(display, False);
        free(config.windows);
        config.windows = NULL;
+   }
+   
+   // Liberar paths de monitores
+   if (config.monitor_paths) {
+       for (int i = 0; i < config.monitor_path_count; i++) {
+           if (config.monitor_paths[i]) {
+               free(config.monitor_paths[i]);
+           }
+       }
+       free(config.monitor_paths);
+       config.monitor_paths = NULL;
    }
    
    if (display) {
@@ -1311,6 +1404,8 @@ static void load_config_file(const char *config_path) {
            config.multi_monitor = (strcmp(value, "true") == 0);
        } else if (strcmp(key, "seamless_transitions") == 0) {
            config.seamless_transitions = (strcmp(value, "true") == 0);
+       } else if (strcmp(key, "per_monitor_content") == 0) {
+           config.per_monitor_content = (strcmp(value, "true") == 0);
        }
    }
    
@@ -1359,6 +1454,7 @@ static void save_config_file(void) {
    fprintf(file, "playlist_loop=%s\n", config.media_playlist.loop ? "true" : "false");
    fprintf(file, "multi_monitor=%s\n", config.multi_monitor ? "true" : "false");
    fprintf(file, "seamless_transitions=%s\n", config.seamless_transitions ? "true" : "false");
+   fprintf(file, "per_monitor_content=%s\n", config.per_monitor_content ? "true" : "false");
    
    fclose(file);
    
@@ -1398,24 +1494,26 @@ static void init_x11(void) {
 // Usage information
 static void usage(void) {
    fprintf(stderr, "%s v%s - Advanced Desktop Background Animation Tool\n", NAME, VERSION);
-   fprintf(stderr, "\nUsage: %s [OPTIONS] <media-file-or-directory>\n\n", NAME);
+   fprintf(stderr, "\nUsage: %s [OPTIONS] <media-file-or-directory> [monitor2-path] [monitor3-path] ...\n\n", NAME);
    fprintf(stderr, "Options:\n");
    fprintf(stderr, "  -m, --multi-monitor    Enable multi-monitor support\n");
    fprintf(stderr, "  -p, --player PLAYER    Media player to use (mpv, mplayer, vlc)\n");
    fprintf(stderr, "  -s, --shuffle          Shuffle playlist\n");
    fprintf(stderr, "  -l, --loop             Loop playlist\n");
-   fprintf(stderr, "  -d, --duration SEC     Duration per video in playlist (default: 30)\n");
+   fprintf(stderr, "  -d, --duration SEC     Duration per video in playlist (enables transitions)\n");
    fprintf(stderr, "  -c, --config FILE      Use custom config file\n");
-   fprintf(stderr, "  --seamless             Enable seamless video transitions (no black screen)\n");
+   fprintf(stderr, "  --smooth               Enable smooth video transitions (no black screen)\n");
+   fprintf(stderr, "  --per-monitor          Different content for each monitor (use with -m)\n");
    fprintf(stderr, "  --auto-res             Auto-detect and use native resolution\n");
    fprintf(stderr, "  --daemon               Run as daemon\n");
    fprintf(stderr, "  --debug                Enable debug output\n");
    fprintf(stderr, "  -h, --help             Show this help\n");
    fprintf(stderr, "\nExamples:\n");
    fprintf(stderr, "  %s video.mp4                    # Single video\n", NAME);
-   fprintf(stderr, "  %s -m ~/Videos/                 # Multi-monitor playlist\n", NAME);
-   fprintf(stderr, "  %s -p mpv -s -l --seamless ~/Wallpapers/   # Seamless transitions\n", NAME);
-   fprintf(stderr, "  %s -d 10 --seamless ~/Videos/  # 10 second duration with seamless transitions\n", NAME);
+   fprintf(stderr, "  %s -m ~/Videos/                 # Multi-monitor with same content\n", NAME);
+   fprintf(stderr, "  %s -m --per-monitor ~/Videos1/ ~/Videos2/ # Different content per monitor\n", NAME);
+   fprintf(stderr, "  %s -d 30 --smooth ~/Videos/     # 30 second duration with smooth transitions\n", NAME);
+   fprintf(stderr, "  %s -m -d 10 --smooth --per-monitor ~/Vid1/ ~/Vid2/ # Per-monitor with smooth transitions\n", NAME);
 }
 
 // Forzar ventanas al fondo
@@ -1455,7 +1553,10 @@ int main(int argc, char **argv) {
    config.auto_resolution = true;
    config.playlist_mode = false;
    config.compositor_aware = false;
-   config.seamless_transitions = false; // Nueva opción por defecto
+   config.seamless_transitions = false;
+   config.per_monitor_content = false;
+   config.monitor_paths = NULL;
+   config.monitor_path_count = 0;
    
    // Load default config
    const char *home = getenv("HOME");
@@ -1486,15 +1587,17 @@ int main(int argc, char **argv) {
            if (++i < argc) {
                config.media_playlist.duration = atoi(argv[i]);
                if (config.media_playlist.duration > 0) {
-                   config.seamless_transitions = true; // Auto-habilitar transiciones suaves
+                   config.playlist_mode = true;
                }
            }
        } else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--config") == 0) {
            if (++i < argc) {
                load_config_file(argv[i]);
            }
-       } else if (strcmp(argv[i], "--seamless") == 0) {
+       } else if (strcmp(argv[i], "--smooth") == 0) {
            config.seamless_transitions = true;
+       } else if (strcmp(argv[i], "--per-monitor") == 0) {
+           config.per_monitor_content = true;
        } else if (strcmp(argv[i], "--auto-res") == 0) {
            config.auto_resolution = true;
        } else if (strcmp(argv[i], "--daemon") == 0) {
@@ -1505,8 +1608,23 @@ int main(int argc, char **argv) {
            usage();
            return 0;
        } else if (argv[i][0] != '-') {
-           strncpy(media_path, argv[i], sizeof(media_path) - 1);
-           media_path[sizeof(media_path) - 1] = '\0';
+           // Esto es un path de media
+           if (strlen(media_path) == 0) {
+               // Primer path (principal)
+               strncpy(media_path, argv[i], sizeof(media_path) - 1);
+               media_path[sizeof(media_path) - 1] = '\0';
+           } else if (config.per_monitor_content) {
+               // Paths adicionales para monitores específicos
+               config.monitor_paths = realloc(config.monitor_paths, 
+                                             (config.monitor_path_count + 1) * sizeof(char*));
+               if (config.monitor_paths) {
+                   config.monitor_paths[config.monitor_path_count] = malloc(strlen(argv[i]) + 1);
+                   if (config.monitor_paths[config.monitor_path_count]) {
+                       strcpy(config.monitor_paths[config.monitor_path_count], argv[i]);
+                       config.monitor_path_count++;
+                   }
+               }
+           }
        }
    }
    
@@ -1514,6 +1632,18 @@ int main(int argc, char **argv) {
        fprintf(stderr, NAME ": Error: No media file or directory specified\n");
        usage();
        return 1;
+   }
+   
+   // Si se especifica per-monitor pero no hay paths adicionales, usar el principal para todos
+   if (config.per_monitor_content && config.monitor_path_count == 0) {
+       config.monitor_paths = malloc(sizeof(char*));
+       if (config.monitor_paths) {
+           config.monitor_paths[0] = malloc(strlen(media_path) + 1);
+           if (config.monitor_paths[0]) {
+               strcpy(config.monitor_paths[0], media_path);
+               config.monitor_path_count = 1;
+           }
+       }
    }
    
    // Crear lock de instancia única
@@ -1529,7 +1659,7 @@ int main(int argc, char **argv) {
    }
    
    char test_cmd[512];
-    snprintf(test_cmd, sizeof(test_cmd), "which %s >/dev/null 2>&1", config.media_player);
+   snprintf(test_cmd, sizeof(test_cmd), "which %s >/dev/null 2>&1", config.media_player);
    if (system(test_cmd) != 0) {
        fprintf(stderr, NAME ": Error: Media player '%s' not found\n", config.media_player);
        fprintf(stderr, NAME ": Please install %s or specify another player with -p\n", config.media_player);
@@ -1538,9 +1668,8 @@ int main(int argc, char **argv) {
    
    // Verificar soporte para transiciones suaves
    if (config.seamless_transitions && !strstr(config.media_player, "mpv")) {
-       fprintf(stderr, NAME ": Warning: Seamless transitions only fully supported with MPV\n");
-       fprintf(stderr, NAME ": Disabling seamless transitions for %s\n", config.media_player);
-       config.seamless_transitions = false;
+       fprintf(stderr, NAME ": Warning: Smooth transitions work best with MPV\n");
+       fprintf(stderr, NAME ": Continuing with basic transitions for %s\n", config.media_player);
    }
    
    // Daemonize if requested
@@ -1592,12 +1721,46 @@ int main(int argc, char **argv) {
        return 1;
    }
    
-   // Create playlist
-   create_playlist(media_path);
-   if (config.media_playlist.count == 0) {
-       fprintf(stderr, NAME ": Error: No compatible media files found\n");
-       cleanup_and_exit();
-       return 1;
+   // Create playlist(s)
+   if (config.per_monitor_content && config.monitor_path_count > 0) {
+       // Agregar el path principal a la lista si no está ya
+       bool main_path_in_list = false;
+       for (int i = 0; i < config.monitor_path_count; i++) {
+           if (strcmp(config.monitor_paths[i], media_path) == 0) {
+               main_path_in_list = true;
+               break;
+           }
+       }
+       
+       if (!main_path_in_list) {
+           config.monitor_paths = realloc(config.monitor_paths, 
+                                         (config.monitor_path_count + 1) * sizeof(char*));
+           if (config.monitor_paths) {
+               // Insertar al principio
+               memmove(&config.monitor_paths[1], &config.monitor_paths[0], 
+                       config.monitor_path_count * sizeof(char*));
+               config.monitor_paths[0] = malloc(strlen(media_path) + 1);
+               if (config.monitor_paths[0]) {
+                   strcpy(config.monitor_paths[0], media_path);
+                   config.monitor_path_count++;
+               }
+           }
+       }
+       
+       if (debug) {
+           fprintf(stderr, NAME ": Per-monitor mode with %d paths:\n", config.monitor_path_count);
+           for (int i = 0; i < config.monitor_path_count; i++) {
+               fprintf(stderr, "  Monitor %d: %s\n", i, config.monitor_paths[i]);
+           }
+       }
+   } else {
+       // Crear playlist global
+       create_playlist(media_path);
+       if (config.media_playlist.count == 0) {
+           fprintf(stderr, NAME ": Error: No compatible media files found\n");
+           cleanup_and_exit();
+           return 1;
+       }
    }
    
    // Determine window count
@@ -1636,6 +1799,11 @@ int main(int argc, char **argv) {
        }
    }
    
+   // Setup per-monitor playlists if needed
+   if (config.per_monitor_content && config.monitor_path_count > 0) {
+       create_monitor_playlists(config.monitor_paths, config.monitor_path_count);
+   }
+   
    // Setup compositor integration
    setup_compositor_integration();
    
@@ -1661,16 +1829,21 @@ int main(int argc, char **argv) {
        fprintf(stderr, NAME ": Setup complete. Running with %d window(s) and %d player(s).\n", 
                config.window_count, config.window_count);
        if (config.seamless_transitions) {
-           fprintf(stderr, NAME ": Seamless transitions enabled\n");
+           fprintf(stderr, NAME ": Smooth transitions enabled\n");
+       }
+       if (config.per_monitor_content) {
+           fprintf(stderr, NAME ": Per-monitor content enabled\n");
+       }
+       if (config.playlist_mode) {
+           fprintf(stderr, NAME ": Playlist mode with %d second duration\n", config.media_playlist.duration);
        }
    }
    
-   // MAIN LOOP CON DETECCIÓN DE CAMBIOS DE PANTALLA Y TRANSICIONES SUAVES
+   // MAIN LOOP MEJORADO
    time_t last_change = time(NULL);
    time_t last_check = time(NULL);
    time_t last_health_check = time(NULL);
    time_t last_screen_check = time(NULL);
-   time_t last_preload_time = time(NULL);
    int consecutive_errors = 0;
    const int MAX_CONSECUTIVE_ERRORS = 10;
    const int MAX_EVENTS_PER_CYCLE = 5;
@@ -1689,7 +1862,7 @@ int main(int argc, char **argv) {
            last_check = now;
        }
        
-       // PROCESAMIENTO DE EVENTOS X11 CON DETECCIÓN DE CAMBIOS DE PANTALLA
+       // PROCESAMIENTO DE EVENTOS X11
        if (display && XPending(display) > 0) {
            int events_processed = 0;
            
@@ -1750,7 +1923,6 @@ int main(int argc, char **argv) {
                            if (debug) {
                                fprintf(stderr, NAME ": Screen change detected via Xrandr\n");
                            }
-                           // Manejar cambio de pantalla inmediatamente
                            handle_screen_resize();
                        }
                        break;
@@ -1780,66 +1952,60 @@ int main(int argc, char **argv) {
            last_health_check = now;
        }
        
-       // Pre-carga de siguientes videos (si las transiciones suaves están habilitadas)
-       if (config.seamless_transitions && config.media_playlist.count > 1 && 
-           config.media_playlist.duration > 0) {
-           
-           // Pre-cargar 5 segundos antes del cambio
-           time_t time_until_change = config.media_playlist.duration - (now - last_change);
-           
-           if (time_until_change <= 5 && now - last_preload_time >= 5) {
-               if (debug) {
-                   fprintf(stderr, NAME ": Pre-loading next videos for seamless transition\n");
-               }
-               
-               for (i = 0; i < config.window_count; i++) {
-                   start_next_media_player(i);
-               }
-               last_preload_time = now;
-           }
-       }
-       
-       // Handle playlist changes CON TRANSICIONES SUAVES
-       if (config.media_playlist.count > 1 && config.media_playlist.duration > 0) {
+       // Handle playlist changes CON TRANSICIONES SUAVES MEJORADAS
+       if (config.playlist_mode && config.media_playlist.duration > 0) {
            if (now - last_change >= config.media_playlist.duration) {
                if (debug) {
                    fprintf(stderr, NAME ": Time to switch playlist item\n");
                }
                
                if (config.seamless_transitions) {
-                   // TRANSICIÓN SUAVE - Cambiar a reproductores pre-cargados
-                   bool smooth_transition_success = true;
-                   
+                   // TRANSICIONES SUAVES MEJORADAS
                    for (i = 0; i < config.window_count; i++) {
-                       if (config.windows[i].next_player_active && 
-                           config.windows[i].next_player_pid > 0) {
-                           switch_to_next_player(i);
-                       } else {
-                           // Fallback: transición normal si no hay reproductor pre-cargado
-                           if (debug) {
-                               fprintf(stderr, NAME ": No pre-loaded player for window %d, using normal transition\n", i);
+                       window_info *win = &config.windows[i];
+                       const char *next_file = NULL;
+                       
+                       // Determinar siguiente archivo
+                       if (config.per_monitor_content && win->monitor_playlist && win->monitor_playlist->count > 1) {
+                           // Avanzar playlist del monitor
+                           monitor_playlist_next(i);
+                           next_file = win->monitor_playlist->paths[win->monitor_playlist->current];
+                       } else if (config.media_playlist.count > 1) {
+                           // Calcular siguiente archivo de playlist global
+                           int next_index;
+                           if (config.media_playlist.shuffle) {
+                               next_index = rand() % config.media_playlist.count;
+                           } else {
+                               next_index = (config.media_playlist.current + 1) % config.media_playlist.count;
                            }
-                           smooth_transition_success = false;
-                           terminate_player(i);
+                           next_file = config.media_playlist.paths[next_index];
+                       }
+                       
+                       if (next_file) {
+                           if (debug) {
+                               fprintf(stderr, NAME ": Starting smooth transition for window %d to: %s\n", i, next_file);
+                           }
+                           start_fade_transition(i, next_file);
                        }
                    }
                    
-                   if (!smooth_transition_success) {
-                       // Cambiar playlist y reiniciar
+                   // Actualizar playlist global si no es per-monitor
+                   if (!config.per_monitor_content) {
                        playlist_next();
-                       sleep(1); // Breve pausa para evitar parpadeo
-                       
-                       for (i = 0; i < config.window_count; i++) {
-                           if (!config.windows[i].player_active) {
-                               start_media_player(i);
-                               usleep(200000);
-                           }
-                       }
                    }
                } else {
-                   // TRANSICIÓN NORMAL (puede haber pantalla negra momentánea)
+                   // TRANSICIONES NORMALES (rápidas pero pueden tener parpadeo)
                    terminate_all_players();
-                   playlist_next();
+                   
+                   // Avanzar playlists
+                   if (config.per_monitor_content) {
+                       for (i = 0; i < config.window_count; i++) {
+                           monitor_playlist_next(i);
+                       }
+                   } else {
+                       playlist_next();
+                   }
+                   
                    sleep(1); // Breve pausa
                    
                    for (i = 0; i < config.window_count; i++) {
@@ -1849,21 +2015,19 @@ int main(int argc, char **argv) {
                }
                
                last_change = now;
-               last_preload_time = 0; // Reset preload timer
            }
        }
        
-       // SLEEP para evitar busy waiting - más inteligente
-       if (config.seamless_transitions && config.media_playlist.duration > 0) {
-           // Sleep más corto durante transiciones para mayor precisión
+       // SLEEP inteligente
+       if (config.playlist_mode && config.media_playlist.duration > 0) {
            time_t time_until_change = config.media_playlist.duration - (now - last_change);
-           if (time_until_change <= 10) {
-               usleep(100000); // 100ms durante los últimos 10 segundos
+           if (time_until_change <= 5) {
+               usleep(200000); // 200ms durante los últimos 5 segundos
            } else {
-               usleep(500000); // 500ms normalmente
+               usleep(1000000); // 1 segundo normalmente
            }
        } else {
-           usleep(500000); // 500ms por defecto
+           usleep(1000000); // 1 segundo por defecto
        }
        
        // Verificación de seguridad
