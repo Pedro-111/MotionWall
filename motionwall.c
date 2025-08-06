@@ -372,20 +372,72 @@ static void resize_window_for_monitor(int window_index, int monitor_id) {
 static bool is_process_healthy(pid_t pid) {
     if (pid <= 0) return false;
     
+    // Verificar si el proceso existe usando kill(pid, 0)
     if (kill(pid, 0) != 0) {
+        if (errno == ESRCH) {
+            // Proceso no existe
+            return false;
+        } else if (errno == EPERM) {
+            // Proceso existe pero no tenemos permisos (esto está bien)
+            return true;
+        }
+        // Otros errores, asumir que no está saludable
         return false;
     }
     
+    // El proceso existe, ahora verificar si es realmente nuestro reproductor
     char proc_path[256];
-    char exe_path[256];
+    char exe_path[1024];
     snprintf(proc_path, sizeof(proc_path), "/proc/%d/exe", pid);
     
     ssize_t len = readlink(proc_path, exe_path, sizeof(exe_path) - 1);
     if (len > 0) {
         exe_path[len] = '\0';
-        return (strstr(exe_path, config.media_player) != NULL);
+        
+        // Verificar si el ejecutable contiene el nombre del reproductor
+        char *basename_exe = basename(exe_path);
+        if (strstr(basename_exe, "mpv") != NULL || 
+            strstr(basename_exe, "mplayer") != NULL || 
+            strstr(basename_exe, "vlc") != NULL) {
+            return true;
+        }
+        
+        // También verificar la ruta completa
+        if (strstr(exe_path, config.media_player) != NULL) {
+            return true;
+        }
     }
     
+    // Como fallback, verificar el comando en /proc/PID/cmdline
+    char cmdline_path[256];
+    snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%d/cmdline", pid);
+    
+    FILE *cmdline_file = fopen(cmdline_path, "r");
+    if (cmdline_file) {
+        char cmdline[1024];
+        size_t read_len = fread(cmdline, 1, sizeof(cmdline) - 1, cmdline_file);
+        fclose(cmdline_file);
+        
+        if (read_len > 0) {
+            cmdline[read_len] = '\0';
+            // Los argumentos están separados por null bytes, convertir el primero
+            for (size_t i = 0; i < read_len; i++) {
+                if (cmdline[i] == '\0') {
+                    cmdline[i] = ' ';
+                    break;
+                }
+            }
+            
+            if (strstr(cmdline, "mpv") != NULL || 
+                strstr(cmdline, "mplayer") != NULL || 
+                strstr(cmdline, "vlc") != NULL) {
+                return true;
+            }
+        }
+    }
+    
+    // Si llegamos aquí, el proceso existe pero no pudimos verificar que sea nuestro reproductor
+    // En caso de duda, asumir que está bien (para evitar reinicios innecesarios)
     return true;
 }
 
@@ -594,6 +646,14 @@ static void check_and_restart_players(void) {
         
         // Verificar reproductor principal
         if (win->player_active && win->player_pid > 0) {
+            // Dar tiempo al proceso para iniciarse completamente
+            if (win->player_start_time > 0 && (now - win->player_start_time) < 5) {
+                if (debug) {
+                    fprintf(stderr, NAME ": Player for window %d is still starting, skipping health check\n", i);
+                }
+                continue;
+            }
+            
             if (!is_process_healthy(win->player_pid)) {
                 if (debug) {
                     fprintf(stderr, NAME ": Player for window %d (PID %d) is unhealthy or dead\n", 
@@ -628,9 +688,9 @@ static void check_and_restart_players(void) {
             start_media_player(i);
         }
         
-        // Verificar timeout del reproductor
+        // Verificar timeout del reproductor (aumentado a 10 minutos)
         if (win->player_active && win->player_start_time > 0) {
-            if (now - win->player_start_time > 300) { // 5 minutos
+            if (now - win->player_start_time > 600) { // 10 minutos
                 if (debug) {
                     fprintf(stderr, NAME ": Player for window %d running too long, checking health\n", i);
                 }
@@ -646,6 +706,7 @@ static void check_and_restart_players(void) {
         }
     }
 }
+
 
 // Safe path joining function
 static bool safe_path_join(char *dest, size_t dest_size, const char *base, const char *append) {
@@ -1250,21 +1311,33 @@ static void start_media_player(int window_index) {
        perror(args[0]);
        _exit(2);
    } else if (pid > 0) {
-       // Parent process
-       win->player_pid = pid;
-       win->player_active = true;
-       win->player_start_time = time(NULL);
-       
-       if (debug) {
-           fprintf(stderr, NAME ": Started %s (PID %d) for window %d with file: %s\n",
-                   config.media_player, pid, window_index, current_file);
-       }
-   } else {
-       perror("fork");
-       win->player_pid = 0;
-       win->player_active = false;
-       win->player_start_time = 0;
-   }
+        // Parent process
+        win->player_pid = pid;
+        win->player_active = true;
+        win->player_start_time = time(NULL);
+        
+        if (debug) {
+            fprintf(stderr, NAME ": Started %s (PID %d) for window %d with file: %s\n",
+                    config.media_player, pid, window_index, current_file);
+            fprintf(stderr, NAME ": Waiting 3 seconds for player to initialize...\n");
+        }
+        
+        // Dar tiempo al reproductor para inicializarse antes de verificar salud
+        sleep(3);
+        
+        // Verificar una vez que el proceso se haya iniciado correctamente
+        if (!is_process_healthy(pid)) {
+            if (debug) {
+                fprintf(stderr, NAME ": Warning: Player PID %d may not have started correctly\n", pid);
+            }
+            // No terminamos inmediatamente, daremos otra oportunidad en el próximo ciclo
+        }
+    } else {
+        perror("fork");
+        win->player_pid = 0;
+        win->player_active = false;
+        win->player_start_time = 0;
+    }
 }
 
 // Playlist management para playlist global
@@ -1947,7 +2020,7 @@ int main(int argc, char **argv) {
        }
        
        // Verificación de salud de reproductores cada 3 segundos
-       if (now - last_health_check >= 3) {
+       if (now - last_health_check >= 10) {
            check_and_restart_players();
            last_health_check = now;
        }
